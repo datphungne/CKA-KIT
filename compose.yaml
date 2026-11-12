@@ -1,0 +1,25 @@
+name: cka-kit
+services:
+  console:
+    image: cka-kit:local
+    build: .
+    ports: ["127.0.0.1:8765:8765"]
+    environment:
+      KUBECONFIG: /lab/config
+      CKA_CONTAINER: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - config:/lab
+      - answers:/workspace/answers
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health')"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+volumes:
+  config:
+    name: cka-kit-config
+  answers:
+    name: cka-kit-answers

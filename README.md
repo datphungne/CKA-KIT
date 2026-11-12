@@ -1,72 +1,77 @@
 # CKA-KIT · Real Kubernetes Practice Console
 
-**14 days · 70 hands-on CKA exercises · one local web interface · real Kubernetes cluster.**
+**14 days · 70 hands-on CKA exercises · one local web console · a real Kubernetes cluster.**
 
-A local-first study environment. The dashboard is a small web app running at `http://127.0.0.1:8765` on your machine, and it controls **actual Kubernetes resources** in a disposable, three-node `kind` cluster. The terminal is a real Bash PTY, not a command simulator. There is no hosted service, account, or remote cluster.
-
-> **Important:** This app can open a shell on your computer and seed/delete resources on its dedicated practice cluster. Never expose its HTTP port to other devices or the public Internet. Use it only on your own trusted computer.
+Everything runs on your own machine. The console at `http://127.0.0.1:8765` drives **actual Kubernetes resources** in a disposable three-node [kind](https://kind.sigs.k8s.io/) cluster (Kubernetes v1.37, Calico CNI). The terminal is a real interactive Bash shell running `kubectl`, `helm` and `vim` — no simulated output, no cloud account, no hosting.
 
 ## Start with one command
 
-**Prerequisites:** Linux, macOS or **Windows WSL2**, Docker Desktop/Engine running, `kind` v0.33+, `kubectl`, `python3` with `venv`, `git`, `bash`, and `curl`. Recommended at least 8 GB free RAM and 3+ CPU cores. Internet is needed initially to install Python dependencies, download images, and load terminal fonts/assets. Use WSL2 bash on Windows (not PowerShell).
+**Prerequisites**
+
+| Requirement | Notes |
+| --- | --- |
+| Docker Desktop (Windows/macOS) or Docker Engine + Compose v2 (Linux) | Must be running. Nothing else to install: kind, kubectl, helm and Python live inside the console image. |
+| `git` | To clone the repository. |
+| 8 GB free RAM, 3+ CPU cores, ~6 GB disk | The cluster is three Docker containers. |
+| Internet on first run | Builds the image, pulls `kindest/node` and Calico. Later runs work from the local cache. |
 
 ```bash
 git clone https://github.com/datphungne/CKA-KIT.git
 cd CKA-KIT
-./start.sh
+docker compose up --build        # or ./start.sh on Linux/macOS/WSL
 ```
 
-Open **http://127.0.0.1:8765** in your browser. The web interface provides:
+Open **http://127.0.0.1:8765**, pick a day and press **Create cluster & start** (first time only, ~3–5 minutes), then **Start Lab**.
 
-1. **Create Cluster** — creates a named disposable `kind-cka-14d` cluster (one control plane + two workers) and installs Calico CNI. Initial setup may take several minutes depending on image downloads.
-2. **Choose Day 01–14** in the left navigation.
-3. **Prepare Lab** — seeds the real namespaces, broken workloads and exercises. **WARNING:** preparing a day again resets its namespace and deletes your previous lab resources.
-4. **Real Terminal** — run `kubectl`, `vim`, `helm`, `bash`, etc. Terminal commands execute locally as your user in a pseudo-terminal. It starts with a context-minified kubeconfig containing only `kind-cka-14d` and the selected namespace. The shell is **not a sandbox**: you can still change environment variables or access your local files, so do not run untrusted commands.
-5. **Resources / Events** — live API information, no mock data.
-6. **Verify all tasks** — runs the existing `days/dayXX/verify.sh` read-only grader; reports PASS / FAIL / MANUAL. Grades are saved only in your browser's local storage.
+## Daily workflow
 
-**First time:** choose **Create Cluster**, then click **Prepare Lab** for Day 1. No need to navigate daily folders manually.
+1. **Choose Day 01–14** in the sidebar. Each day has five exercises in its own namespace `cka-dXX`.
+2. **Start Lab** seeds that namespace with the day's broken workloads. Starting a day again resets only that namespace.
+3. **Solve in the terminal.** The shell opens with the day's namespace as default, `k=kubectl`, tab completion, `vim`, `helm` and `$do` (`--dry-run=client -o yaml`). Save evidence files under `/workspace/answers` (persisted in a Docker volume).
+4. **Resources / Events** tabs show live API data for the namespace. If the API is unreachable they say *Disconnected* instead of showing an empty list.
+5. **Verify all tasks** runs `days/dayXX/verify.sh` against live cluster state and marks each task PASS / FAIL / MANUAL. Results are kept in your browser only.
+6. **Clean up this day** deletes the namespace, uncordons the workers and removes the Day 02 scheduling taint/label.
 
-### How to stop
+### Stop, resume, remove
 
-Press `Ctrl+C` in the terminal running `./start.sh`. This stops the local website **but leaves your Kubernetes practice cluster intact**, so you can continue the next day. To remove the entire lab permanently:
+| Goal | Command |
+| --- | --- |
+| Stop the console, keep the cluster for tomorrow | `Ctrl+C` or `docker compose down` |
+| Resume | `docker compose up` — the console reconnects to the existing cluster |
+| Delete the practice cluster | `docker compose exec console bash cluster/delete-kind.sh --confirm-delete` |
+| Also delete saved answers and lab credentials | `docker compose down -v` |
 
-```bash
-bash cluster/delete-kind.sh --confirm-delete
+## How it is isolated
+
+```text
+Browser ── 127.0.0.1:8765 ──► console container (FastAPI)
+                                 │  fixed action allow-list: create-cluster / setup / verify / cleanup / doctor
+                                 │  Docker socket ──► kind: cka-14d (control-plane + 2 workers, Calico)
+                                 │
+                                 └─ WebSocket ──► per-session terminal container
+                                                   no Docker socket · no host files · all capabilities dropped
+                                                   512 MiB / 128 PIDs · lab-only kubeconfig (read-only volume)
 ```
 
-## What is real vs. not included?
+- **Your own kubeconfig is never mounted.** Lab credentials come from `kind get kubeconfig --name cka-14d`.
+- **Every script verifies cluster identity before acting.** `lib/safety.py` checks that the target is the kind control-plane container labelled `cka-14d` and that its CA matches the kubeconfig in use. A context merely *named* `kind-cka-14d` that points elsewhere is refused, so setup/cleanup/grading can never hit a non-lab cluster.
+- **Loopback only.** The port is bound to `127.0.0.1`; mutating requests and terminal WebSockets must come from the same origin.
+- **Lab workloads cannot reach the console.** The console joins kind's network to talk to the API server, so it refuses every connection whose TCP source is a kind subnet (terminals and Pods), regardless of forged `Host`/`Origin` headers (`lib/netguard.py`).
+- **Learner files are never executed.** The Day 11 kubeconfig check only accepts inline credentials — `exec`, `auth-provider` and file-path fields are rejected before `kubectl` sees the file.
+- **Caveat:** the *console* container holds the Docker socket so it can manage kind. That is root-equivalent on the Docker host — do not expose port 8765 or run the console on a shared machine.
+
+## What is real vs. not included
 
 | Feature | Implementation |
 | --- | --- |
-| Pod / Deployment / Service / Node state | Real `kubectl` calls to Kubernetes API |
-| Shell / kubectl / editing manifests | Real local Bash PTY over WebSocket |
-| Setup / reset of daily labs | Existing shell scripts from each `days/dayXX/` folder |
-| Automated checking | Existing `bin/grade.py` against live Kubernetes state |
-| NetworkPolicies | Calico networking, not simulated rules |
-| kubeadm joins, upgrades and etcd restoration | **Must be performed on separate disposable VMs.** A kind cluster is not an equivalent replacement |
-| Ingress, Gateway API and metrics-server | Only available when their controllers are installed; see `cluster/addons.md` |
-| Official CKA score | Not available. Exam-like scores are custom self-assessment only |
-
-## Architecture
-
-```text
-Browser localhost:8765
-  ├── 14-day exercise UI + progress + resource explorer
-  ├── WebSocket terminal ────── Bash PTY ── kubectl / helm / vim
-  └── REST API ── safe action registry ── setup.sh / verify.sh
-                     │
-              kind-cka-14d (Docker)
-              ├── control-plane
-              ├── worker
-              └── worker   + Calico NetworkPolicy
-```
-
-Only loopback address `127.0.0.1` is bound. No external hosting or user account. API actions are a fixed allow-list, and the grader/setup scripts check that `kubectl`'s current context is `kind-cka-14d`. The browser terminal has an isolated default kubeconfig, but it is still a host shell and has your normal host permissions.
-
-## Terminal assets
-
-The UI loads xterm.js and a fit addon from jsDelivr CDN. If you are offline, a simple shell input fallback is shown; for a fully interactive TTY, load the xterm assets while connected. The local backend runs with Python FastAPI/uvicorn installed into `.venv/` at first start.
+| Pods / Deployments / Services / Nodes | Real `kubectl` against the Kubernetes API |
+| Terminal | Real Bash PTY in an isolated container, streamed with xterm.js (bundled locally) |
+| Lab setup / reset / cleanup | The `setup.sh` / `cleanup.sh` scripts in each `days/dayXX/` |
+| Grading | `bin/grade.py` against live cluster state |
+| NetworkPolicy | Enforced by Calico, not simulated |
+| kubeadm join/upgrade, etcd restore, kubelet repair | **Need separate disposable VMs** — see `admin/VM-TRACK.md`. Shown as MANUAL by the grader. |
+| Ingress, Gateway API, metrics-server | Not installed by default — see `cluster/addons.md` |
+| Official CKA score | Not available. Mock-exam scores are self-assessment only. |
 
 ## Daily content
 
@@ -80,15 +85,31 @@ The UI loads xterm.js and a fit addon from jsDelivr CDN. If you are offline, a s
 | 06 | Maintenance, RBAC, Helm | 13 | Final speed drills |
 | 07 | App troubleshooting | 14 | Final mock |
 
-For all 70 individual instructions see `WORKBOOK.md` or the **Exercises** tab. Each `days/dayXX` folder is self-contained with `TASKS.md`, `setup.sh`, `verify.sh`, `cleanup.sh`. Admin exercises involving physical kubelet, kubeadm, and etcd still require `admin/VM-TRACK.md`.
+All 70 instructions are in `WORKBOOK.md` and in the **Exercises** tab. Each `days/dayXX/` folder contains `TASKS.md`, `setup.sh`, `verify.sh` and `cleanup.sh`.
 
-## If something goes wrong
+## Pinned versions
 
-- **Create Cluster fails:** confirm Docker is running, `kind` works and at least 8 GB free RAM is available. Click Diagnose to inspect prerequisites.
-- **Kubernetes terminal disconnected:** create the cluster, verify API Ready and press ↻ in the terminal toolbar.
-- **Port 8765 already in use:** close another instance of the console.
-- **PermissionError / no Python venv:** install Python virtualenv support (`sudo apt install python3-venv` on Debian/Ubuntu).
-- **Lab verification fails:** read the check descriptions; some exercises require local `answers/` evidence and/or manual VM work.
-- **Ingress/Gateway tasks fail:** first install suitable controllers; they aren't installed automatically.
+kind v0.33.0 · `kindest/node:v1.37.0` (digest pinned in `cluster/create-kind.sh`) · kubectl v1.37.0 · Helm v3.22.1 · Calico v3.33.0. Calico v3.33 requires Kubernetes ≥ 1.36; keep `KUBECTL_VERSION` in the `Dockerfile` in step with the node image.
 
-Official references: [Kubernetes Documentation](https://kubernetes.io/docs/), [kind](https://kind.sigs.k8s.io/), [Calico on kind](https://docs.tigera.io/calico/latest/getting-started/kubernetes/kind), [CKA certification](https://training.linuxfoundation.org/certification/certified-kubernetes-administrator-cka/).
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest                                  # unit + contract tests, no cluster needed
+
+# Full lifecycle on a real cluster (setup → verify → cleanup for all 14 days, ~11 min):
+docker compose up -d --build                      # then create the cluster once in the UI
+CKA_INTEGRATION=1 python -m pytest tests/test_integration.py -v
+```
+
+The unit suite covers the cluster-identity guard, the HTTP/WebSocket contract (origin checks, action allow-list, single-action lock), terminal container isolation flags, shell-script syntax, namespace validation and grader coverage. The integration suite also asserts that a freshly seeded day never auto-passes a task, that a container on the kind network gets 403 from the console, and that a kubeconfig with an `exec` plugin is rejected without running it.
+
+## Troubleshooting
+
+- **Create cluster fails:** open **Diagnose**. Make sure Docker is running with ≥ 8 GB RAM. A failed creation removes the half-built cluster automatically, so you can retry.
+- **Cluster shows *Degraded*:** the API is up but some nodes are NotReady. Right after creation this is Calico still starting; otherwise check `kubectl get nodes` / `kubectl describe node`, or recreate the cluster.
+- **Terminal disconnected:** press ↻ in the terminal toolbar. Up to four terminals can be open at once.
+- **Port 8765 already in use:** another console is running — `docker compose down` in that checkout.
+- **A task stays FAIL:** read its *Pass when* line. Some tasks need evidence files in `/workspace/answers`; admin tasks are MANUAL by design.
+
+References: [Kubernetes docs](https://kubernetes.io/docs/) · [kind](https://kind.sigs.k8s.io/) · [Calico on kind](https://docs.tigera.io/calico/latest/getting-started/kubernetes/kind) · [CKA certification](https://training.linuxfoundation.org/certification/certified-kubernetes-administrator-cka/)

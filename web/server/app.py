@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 from pathlib import Path
-import pty
 import re
 import select
 import shutil
@@ -17,15 +16,20 @@ import signal
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
-import fcntl
-import termios
 from typing import Literal
+from concurrent.futures import ThreadPoolExecutor
+import codecs
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+if os.name == "posix":
+    import pty
+    import fcntl
+    import termios
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +40,23 @@ STATIC = ROOT / 'web' / 'static'
 CONTEXT = 'kind-cka-14d'
 CLUSTER = 'cka-14d'
 JOB_TTL = 3600
+sys.path.insert(0, str(ROOT / 'lib'))
+from safety import snapshot, trusted_config
+from netguard import from_lab_network, lab_networks
+
+MAX_TERMINALS = 4
+
+
+def local_origin(headers):
+    host = headers.get('host', '')
+    return host in ('localhost:8765', '127.0.0.1:8765') and headers.get('origin') == f'http://{host}'
+
+
+async def lab_client(client) -> bool:
+    """True when the TCP peer sits on kind's network (a lab terminal or Pod), whatever its headers say."""
+    networks = await asyncio.to_thread(lab_networks)
+    return from_lab_network(client.host if client else None, networks)
+
 app = FastAPI(title='CKA-KIT Local Lab', docs_url=None, redoc_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', '127.0.0.1:8765', 'localhost:8765'])
 app.mount('/static', StaticFiles(directory=str(STATIC)), name='static')
@@ -43,6 +64,23 @@ app.mount('/static', StaticFiles(directory=str(STATIC)), name='static')
 _jobs: dict[str, dict] = {}
 _job_lock = threading.Lock()
 _busy = threading.Lock()
+_terminals = set()
+
+
+@app.middleware('http')
+async def protect_local_api(request: Request, call_next):
+    if await lab_client(request.client):
+        return JSONResponse({'detail': 'Console is not reachable from lab workloads'}, status_code=403)
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and not local_origin(request.headers):
+        return JSONResponse({'detail': 'Same-origin localhost request required'}, status_code=403)
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:8765 ws://localhost:8765; frame-ancestors 'none'"
+    if request.url.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
+
 
 
 def cli(args: list[str], timeout=9, env=None) -> dict:
@@ -66,23 +104,22 @@ def namespace(day: int) -> str:
 
 
 def expected_context() -> bool:
-    r = cli(['kubectl', 'config', 'current-context'])
-    return r['ok'] and r['stdout'].strip() == CONTEXT
+    try:
+        trusted_config()
+        return True
+    except Exception:
+        return False
 
 
 def kubectl(*args: str, timeout=8) -> dict:
-    # Explicit --context even if the active context is changed elsewhere.
     return cli(['kubectl', '--context', CONTEXT, '--request-timeout=5s', *args], timeout=timeout)
 
 
 def objects(*args: str) -> list:
     r = kubectl(*args, '-o', 'json')
     if not r['ok']:
-        return []
-    try:
-        return json.loads(r['stdout']).get('items', [])
-    except (json.JSONDecodeError, TypeError):
-        return []
+        raise RuntimeError(r['stderr'] or 'Kubernetes request failed')
+    return json.loads(r['stdout']).get('items', [])
 
 
 def pod_status(o):
@@ -111,8 +148,17 @@ def status():
     exists = CLUSTER in clusters['stdout'].splitlines()
     api = kubectl('get', '--raw=/readyz') if exists and tools['kubectl'] else {'ok': False}
     ready = bool(api['ok'])
-    nodes = objects('get', 'nodes') if ready else []
-    return {'tools': tools, 'context': context, 'expectedContext': CONTEXT,
+    error = ''
+    try:
+        nodes = objects('get', 'nodes') if ready else []
+    except (RuntimeError, ValueError) as exc:
+        nodes = []
+        ready = False
+        error = str(exc)
+    if exists and not ready and not error:
+        error = api.get('stderr', 'Kubernetes API unavailable')
+
+    return {'tools': tools, 'error': error, 'context': context, 'expectedContext': CONTEXT,
             'clusterExists': exists, 'ready': ready, 'nodes': len(nodes),
             'readyNodes': sum(1 for n in nodes if any(c.get('type') == 'Ready' and c.get('status') == 'True'
                                              for c in n.get('status', {}).get('conditions', []))),
@@ -127,14 +173,15 @@ def get_day(day: int):
 @app.get('/api/resources/{day}')
 def resources(day: int):
     safe_day(day)
-    if not kubectl('get', '--raw=/readyz')['ok']:
-        return {'connected': False, 'pods': [], 'deployments': [], 'services': [], 'events': [], 'nodes': []}
     ns = namespace(day)
-    pods = objects('-n', ns, 'get', 'pods')
-    deployments = objects('-n', ns, 'get', 'deployments')
-    services = objects('-n', ns, 'get', 'services')
-    events = objects('-n', ns, 'get', 'events')
-    nodes = objects('get', 'nodes')
+    kinds = ['pods', 'deployments', 'services', 'events', 'nodes']
+    try:
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(objects, *(['-n', ns] if kind != 'nodes' else []), 'get', kind) for kind in kinds]
+            pods, deployments, services, events, nodes = [f.result() for f in futures]
+    except (RuntimeError, ValueError, TypeError) as exc:
+        return {'connected': False, 'error': str(exc), **{kind: [] for kind in kinds}}
+    events.sort(key=lambda e: e.get('lastTimestamp') or e.get('eventTime') or e.get('metadata', {}).get('creationTimestamp', ''))
     return {
         'connected': True,
         'pods': [{'name': p['metadata']['name'], 'status': pod_status(p),
@@ -178,14 +225,25 @@ def command_for(req: Action) -> list[str]:
 def launch_job(job: dict, args: list[str]):
     try:
         p = subprocess.Popen(args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, bufsize=1, env=os.environ.copy())
+                             text=True, bufsize=1, env=os.environ.copy(), start_new_session=True)
         with _job_lock:
             job['pid'] = p.pid
         assert p.stdout is not None
+        def expire():
+            job['output'] += '\nAction timed out after 15 minutes.\n'
+            if p.poll() is None:
+                if os.name == 'posix':
+                    os.killpg(p.pid, signal.SIGKILL)
+                else:
+                    p.kill()
+        deadline = threading.Timer(900, expire)
+        deadline.daemon = True
+        deadline.start()
         for line in p.stdout:
             with _job_lock:
                 job['output'] = (job['output'] + line)[-160_000:]
         code = p.wait()
+        deadline.cancel()
         with _job_lock:
             job['code'] = code
             job['state'] = 'finished'
@@ -206,7 +264,7 @@ def action(req: Action):
         raise HTTPException(409, 'Another lab action is already running')
     try:
         if req.action not in ('create-cluster', 'doctor') and not expected_context():
-            raise HTTPException(412, f'Current kubectl context must be {CONTEXT}; refusing to touch any other cluster')
+            raise HTTPException(412, 'Dedicated kind lab identity could not be verified; run Diagnose')
         if req.action == 'create-cluster' and cli(['kind', 'get', 'clusters'])['stdout'].splitlines().count(CLUSTER):
             raise HTTPException(409, 'Disposable cluster already exists')
         now = time.time()
@@ -239,104 +297,129 @@ def health():
 
 
 def terminal_config(day: int) -> str:
-    """Generate a context-minified config so ordinary shell kubectl stays on the lab cluster."""
-    out = cli(['kubectl', 'config', 'view', '--raw', '--flatten', '--minify', '--context', CONTEXT], timeout=10)
-    if not out['ok'] or not out['stdout'].strip():
-        raise RuntimeError('Cluster config not found. Create kind-cka-14d first.')
-    # Only this single cluster/user/context is present; no production contexts.
-    tmp_dir = Path(tempfile.mkdtemp(prefix='cka-ui-kubeconfig-'))
-    path = tmp_dir / 'config'
-    path.write_text(out['stdout'], encoding='utf-8')
-    path.chmod(0o600)
-    cli(['kubectl', '--kubeconfig', str(path), 'config', 'set-context', '--current', '--namespace', namespace(day)])
-    return str(path)
+    return snapshot(safe_day(day))
+
+
+def terminal_command(day, config, name):
+    if os.environ.get('CKA_CONTAINER') != '1':
+        raise RuntimeError('Start with docker compose up --build for the isolated terminal.')
+    return ['docker', 'run', '--rm', '--init', '-it', '--name', name, '--label', 'cka-kit.terminal=1',
+            '--network', 'kind', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+            '--memory=512m', '--pids-limit=128',
+            '-v', 'cka-kit-config:/lab:ro', '-v', 'cka-kit-answers:/workspace/answers',
+            '-e', f'KUBECONFIG={config}', '-e', f'CKA_NS={namespace(day)}',
+            '-e', 'TERM=xterm-256color', '-e', 'HISTFILE=/dev/null',
+            '-e', f'CKA_DAY={day:02d}',
+            'cka-kit:local', 'bash', '--noprofile', '--rcfile', '/workspace/web/terminal.bashrc', '-i']
+
+
+def reap_terminal_container(name: str, attempts: int = 3, delay: float = 1.0) -> bool:
+    """Force-remove a terminal container until Docker no longer lists it. Returns True once gone."""
+    for _ in range(attempts):
+        cli(['docker', 'rm', '-f', name], 10)
+        listed = cli(['docker', 'ps', '-aq', '--filter', f'name=^/{name}$'], 10)
+        if listed['ok'] and not listed['stdout'].strip():
+            return True
+        time.sleep(delay)
+    return False
 
 
 @app.websocket('/ws/terminal/{day}')
 async def terminal(ws: WebSocket, day: int):
-    if not 1 <= day <= 14:
+    # HTTP middleware does not run for WebSockets, so repeat the network check here.
+    from_lab = await lab_client(ws.client)
+    # No await between the capacity check and the reservation, so concurrent handshakes cannot exceed the cap.
+    if from_lab or not 1 <= day <= 14 or not local_origin(ws.headers) or len(_terminals) >= MAX_TERMINALS:
         await ws.close(code=1008)
         return
-    origin = ws.headers.get('origin', '')
-    host = ws.headers.get('host', '')
-    if host not in ('localhost:8765', '127.0.0.1:8765') or (origin and origin not in ('http://localhost:8765', 'http://127.0.0.1:8765')):
-        await ws.close(code=1008)
-        return
-    await ws.accept()
-    if os.name != 'posix' or not shutil.which('bash'):
-        await ws.send_text('\r\nReal terminal requires Linux / macOS / WSL2 bash.\r\n')
-        await ws.close()
-        return
-    try:
-        config = terminal_config(day)
-    except RuntimeError as exc:
-        await ws.send_text('\r\n' + str(exc) + '\r\n')
-        await ws.close()
-        return
+    name = 'cka-terminal-' + uuid.uuid4().hex[:12]
+    _terminals.add(name)
     master = slave = -1
     child = None
+    config = None
+    reader = receiver = None
     try:
+        await ws.accept()
+        config = await asyncio.to_thread(terminal_config, day)
+        args = terminal_command(day, config, name)
         master, slave = pty.openpty()
-        env = os.environ.copy()
-        env.update({'KUBECONFIG': config, 'CKA_NS': namespace(day), 'TERM': 'xterm-256color',
-                    'PS1': fr'\[\033[1;34m\]cka:{day:02d}\[\033[0m\] \w $ ',
-                    'HISTFILE': '/dev/null'})
-        def configure_pty():
-            os.setsid()
-            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-
-        child = subprocess.Popen(['bash', '--noprofile', '--norc', '-i'], stdin=slave, stdout=slave, stderr=slave,
-                                 cwd=ROOT, env=env, preexec_fn=configure_pty, close_fds=True)
+        # Docker allocates the controlling terminal inside the isolated container.
+        child = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave,
+                                 start_new_session=True, close_fds=True)
         os.close(slave)
         slave = -1
-        os.write(master, b'alias k=kubectl\nclear\nprintf "CKA terminal (real Kubernetes) | namespace: $CKA_NS\\n"\n')
+        os.set_blocking(master, False)
+        await ws.send_text('\r\nStarting isolated lab shell…\r\n')
 
         async def read_pty():
-            while child and child.poll() is None:
-                readable = await asyncio.to_thread(select.select, [master], [], [], 0.25)
+            decoder = codecs.getincrementaldecoder('utf-8')('replace')
+            while True:
+                readable = await asyncio.to_thread(select.select, [master], [], [], 0.2)
                 if not readable[0]:
+                    if child.poll() is not None:
+                        break
                     continue
                 try:
                     data = os.read(master, 65536)
-                except OSError:
+                except (OSError, BlockingIOError):
                     break
                 if not data:
                     break
-                await ws.send_text(data.decode('utf-8', errors='replace'))
+                await ws.send_text(decoder.decode(data))
 
-        reader = asyncio.create_task(read_pty())
-        try:
+        async def receive_input():
             while True:
-                msg = await ws.receive_text()
-                data = json.loads(msg)
+                message = await ws.receive_text()
+                if len(message) > 65536:
+                    raise ValueError('Terminal frame too large')
+                data = json.loads(message)
+                if not isinstance(data, dict):
+                    raise ValueError('Expected an object')
                 if data.get('type') == 'input' and isinstance(data.get('data'), str):
-                    os.write(master, data['data'][:8192].encode('utf-8'))
+                    remaining = data['data'].encode('utf-8')
+                    while remaining:
+                        try:
+                            count = os.write(master, remaining)
+                            remaining = remaining[count:]
+                        except BlockingIOError:
+                            await asyncio.sleep(0.01)
                 elif data.get('type') == 'resize':
                     cols = max(20, min(int(data.get('cols', 110)), 300))
-                    rows = max(10, min(int(data.get('rows', 28)), 100))
+                    rows = max(5, min(int(data.get('rows', 28)), 100))
                     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
-                    try:
+                    if child.poll() is None:
                         os.killpg(child.pid, signal.SIGWINCH)
-                    except ProcessLookupError:
-                        pass
-        except (WebSocketDisconnect, json.JSONDecodeError, OSError):
+
+        reader = asyncio.create_task(read_pty())
+        receiver = asyncio.create_task(receive_input())
+        done, pending = await asyncio.wait([reader, receiver], return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    except (WebSocketDisconnect, json.JSONDecodeError, ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        try:
+            await ws.send_text(f'\r\n{exc}\r\n')
+        except (RuntimeError, WebSocketDisconnect):
             pass
-        finally:
-            reader.cancel()
-            try:
-                await reader
-            except (asyncio.CancelledError, OSError):
-                pass
     finally:
+        for task in (reader, receiver):
+            if task:
+                task.cancel()
+        await asyncio.gather(*(t for t in (reader, receiver) if t), return_exceptions=True)
+        # Remove the sibling container even when bash ignores HUP/TERM.
+        await asyncio.to_thread(cli, ['docker', 'rm', '-f', name], 10)
         if child and child.poll() is None:
-            try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            child.kill()
+        if child:
+            await asyncio.to_thread(child.wait)
+            # Killing the docker CLI mid-create does not stop the daemon from starting the container.
+            await asyncio.to_thread(reap_terminal_container, name)
         for fd in (master, slave):
             if fd >= 0:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-        shutil.rmtree(Path(config).parent, ignore_errors=True)
+                os.close(fd)
+        if config:
+            Path(config).unlink(missing_ok=True)
+        _terminals.discard(name)
+        try:
+            await ws.close()
+        except (RuntimeError, WebSocketDisconnect):
+            pass

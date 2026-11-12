@@ -10,7 +10,7 @@
 
 **Your mission:** Seeded `maintenance-app` has 3 replicas. Choose a kind worker with a replica, cordon it, drain it (account for DaemonSets), verify app availability, and uncordon afterward.
 
-**Pass when:** Worker schedulable and all 3 replicas available.
+**Pass when:** Worker schedulable, all 3 replicas available, and at least one replica was evicted and rescheduled by your drain.
 
 **Check yourself:**
 

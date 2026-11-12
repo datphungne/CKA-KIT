@@ -10,6 +10,8 @@ import pathlib
 import re
 import subprocess
 import sys
+import os
+import atexit
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -27,9 +29,14 @@ def cmd(*args: str, timeout: int = 12) -> tuple[bool, str]:
     return run.returncode == 0, run.stdout.strip()
 
 
-ok, context = cmd("kubectl", "config", "current-context")
-if not ok or context != EXPECTED_CONTEXT:
-    sys.exit(f"REFUSED: kubectl context must be {EXPECTED_CONTEXT}, not '{context}'")
+sys.path.insert(0, str(ROOT / 'lib'))
+from safety import snapshot
+try:
+    config = snapshot(DAY)
+except Exception as exc:
+    sys.exit(f'REFUSED: {exc}')
+os.environ['KUBECONFIG'] = config
+atexit.register(lambda: pathlib.Path(config).unlink(missing_ok=True))
 
 
 def obj(kind: str, name: str, ns: str | None = NS) -> dict[str, Any]:
@@ -121,6 +128,8 @@ def policies(name: str, selected_label: dict[str, str], from_label: dict[str, st
 
 
 def traffic(client: str, service: str, expect_success: bool = True) -> bool:
+    if not ready("pod", client):
+        return False
     # If no Service exists, target a backend Pod IP directly.
     target = service
     if not obj("svc", service):
@@ -157,6 +166,59 @@ def file_contains(filename: str, *parts: str) -> bool:
 
 def role_ok(sa: str, allowed: str, forbidden: str, resource: str) -> bool:
     return bool(obj("sa", sa)) and can(sa, allowed, resource) and not can(sa, forbidden, resource)
+
+
+SAFE_USER_KEYS = {"client-certificate-data", "client-key-data", "token", "username", "password"}
+SAFE_CLUSTER_KEYS = {"server", "certificate-authority-data", "tls-server-name", "insecure-skip-tls-verify"}
+
+
+def learner_kubeconfig_works(filename: str) -> bool:
+    """Run `kubectl cluster-info` against a learner-written kubeconfig without trusting it.
+
+    The grader runs in the console container (which holds the Docker socket). A kubeconfig can
+    make kubectl execute programs (users[].user.exec / auth-provider) or read arbitrary files
+    (*-file / tokenFile keys), so only inline credentials are accepted, and kubectl reads a
+    re-serialised copy so the file cannot be swapped between validation and use.
+    """
+    import tempfile
+    import yaml
+    try:
+        data = yaml.safe_load((ROOT / "answers" / filename).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    users = [u.get("user") or {} for u in data.get("users") or [] if isinstance(u, dict)]
+    clusters = [c.get("cluster") or {} for c in data.get("clusters") or [] if isinstance(c, dict)]
+    if not all(isinstance(u, dict) and set(u) <= SAFE_USER_KEYS for u in users):
+        print("  [INFO] kubeconfig rejected: only inline credentials (no exec/auth-provider/file paths) are graded")
+        return False
+    if not all(isinstance(c, dict) and set(c) <= SAFE_CLUSTER_KEYS for c in clusters):
+        print("  [INFO] kubeconfig rejected: unsupported cluster fields (e.g. proxy-url, certificate-authority path)")
+        return False
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as copy:
+        yaml.safe_dump(data, copy)
+    try:
+        return cmd("kubectl", "--kubeconfig", copy.name, "cluster-info")[0]
+    finally:
+        pathlib.Path(copy.name).unlink(missing_ok=True)
+
+
+def rescheduled(deploy: str, label: str, min_age_gap: int = 30) -> bool:
+    """True when at least one Pod was recreated well after the Deployment (e.g. evicted by a drain).
+
+    A cordon/drain/uncordon round-trip leaves nodes and replica counts exactly as seeded,
+    so the end state alone cannot prove the work was done.
+    """
+    from datetime import datetime
+    created = path(obj("deploy", deploy), "metadata", "creationTimestamp")
+    good, raw = cmd("kubectl", "-n", NS, "get", "pods", "-l", f"app={label}", "-o", "json")
+    if not created or not good:
+        return False
+    parse = lambda ts: datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+    start = parse(created)
+    return any((parse(p["metadata"]["creationTimestamp"]) - start).total_seconds() >= min_age_gap
+               for p in json.loads(raw).get("items", []))
 
 
 def no_taint(key: str) -> bool:
@@ -201,7 +263,7 @@ TASKS: dict[int, list[tuple[str, Any]]] = {
     ("VM kubeadm and restore [MANUAL]", None),
   ],
   6: [
-    ("All worker nodes schedulable; app 3/3", lambda: all_nodes_ready() and ready("deploy","maintenance-app",3)),
+    ("All worker nodes schedulable; app 3/3", lambda: all_nodes_ready() and ready("deploy","maintenance-app",3) and rescheduled("maintenance-app","maintenance-app")),
     ("Namespace pod-reader Role+RoleBinding", lambda: role_ok("auditor","list","delete","pods") and bool(obj("role","pod-reader")) and bool(obj("rolebinding","auditor-binding"))),
     ("Cluster node-reader RoleBinding", lambda: bool(obj("clusterrole","cka-d06-node-reader",None)) and bool(obj("clusterrolebinding","cka-d06-node-reader",None)) and bool(obj("sa","node-auditor")) and can("node-auditor","list","nodes",None) and not can("node-auditor","patch","nodes",None)),
     ("Helm chart deployed at 3 replicas", lambda: ready("deploy","mini-web",3) and bool(cmd("helm","-n",NS,"status","cka-d06-web")[0])),
@@ -223,7 +285,7 @@ TASKS: dict[int, list[tuple[str, Any]]] = {
   ],
   9: [
     ("RollingUpdate Deployment 4/4", lambda: ready("deploy","payments",4) and image("deploy","payments") == "nginx:1.27" and path(obj("deploy","payments"),"spec","strategy","rollingUpdate","maxUnavailable") in (1,"1")),
-    ("RBAC viewer config-reader", lambda: role_ok("viewer","list","get","configmaps") and not can("viewer","get","secrets") and bool(obj("rolebinding","viewer-config"))),
+    ("RBAC viewer config-reader", lambda: role_ok("viewer","list","delete","configmaps") and can("viewer","get","configmaps") and not can("viewer","get","secrets") and bool(obj("rolebinding","viewer-config"))),
     ("Database allow-only NetworkPolicy", lambda: policies("db-allow-api",{"app":"db"},{"role":"api"}) and traffic("role-client","db") and traffic("random-client","db",False)),
     ("2Gi claim mounted", lambda: volume("payments-data","2Gi") and has_mount("payments-writer","payments-data","/var/lib/data")),
     ("Service selector fixed", lambda: svc("bad-svc",{"app":"api"},80,80) and endpoints("bad-svc")),
@@ -239,13 +301,13 @@ TASKS: dict[int, list[tuple[str, Any]]] = {
     ("OOMKilled repaired with 512Mi limit", lambda: ready("pod","memory-hog") and path(obj("pod","memory-hog"),"spec","containers",0,"resources","limits","memory") == "512Mi"),
     ("Readiness corrected", lambda: ready("deploy","probe-failure",2) and probe("probe-failure","readinessProbe",80)),
     ("Service targetPort fixed", lambda: svc("web-svc",{"app":"web"},80,80) and endpoints("web-svc")),
-    ("Fixed kubeconfig copy", lambda: (ROOT / "answers/day11-kubeconfig.yaml").is_file() and bool(cmd("kubectl","--kubeconfig",str(ROOT / "answers/day11-kubeconfig.yaml"),"cluster-info")[0])),
+    ("Fixed kubeconfig copy", lambda: learner_kubeconfig_works("day11-kubeconfig.yaml")),
     ("Scheduler fault drill [MANUAL]", None),
   ],
   12: [
     ("Admin snapshot and drain evidence [MANUAL]", None),
     ("Image/selector repaired + nodes healthy", lambda: ready("deploy","faulty-image") and image("deploy","faulty-image") == "nginx:1.27" and svc("payments-svc",{"app":"payments"},80,80) and endpoints("payments-svc") and all_nodes_ready()),
-    ("NodePort and network policy", lambda: svc("payments-nodeport",{"app":"payments"},80,80,30080) and policies("payments-allow",{"app":"payments"},{"role":"allowed"}) and traffic("allowed-client","payments-svc")),
+    ("NodePort and network policy", lambda: svc("payments-nodeport",{"app":"payments"},80,80,30080) and policies("payments-allow",{"app":"payments"},{"role":"allowed"}) and traffic("allowed-client","payments-svc") and traffic("net-client","payments-svc",False)),
     ("DaemonSet CronJob and ConfigMap", lambda: bool(obj("ds","log-agent")) and bool(obj("cronjob","daily-job")) and path(obj("cronjob","daily-job"),"spec","schedule") == "*/5 * * * *" and path(obj("cm","runtime-settings"),"data","MODE") == "test"),
     ("Backup claim mounted", lambda: volume("backup-claim","1Gi") and has_mount("backup-pod","backup-claim","/backup")),
   ],

@@ -13,3 +13,8 @@ web/__pycache__/
 web/server/__pycache__/
 web/.runtime/
 *.pyc
+
+.runtime/
+node_modules/
+.test-results/
+.omc/

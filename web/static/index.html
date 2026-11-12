@@ -5,11 +5,10 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080f1e">
   <title>CKA Lab — Kubernetes Practice Console</title>
-  <link rel="preconnect" href="https://cdn.jsdelivr.net">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+  <link rel="stylesheet" href="/static/vendor/xterm.css">
   <link rel="stylesheet" href="/static/style.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+  <script defer src="/static/vendor/xterm.js"></script>
+  <script defer src="/static/vendor/addon-fit.js"></script>
   <script defer src="/static/app.js"></script>
 </head>
 <body>
@@ -38,6 +37,7 @@
         <div><div class="eyebrow"><span class="eyebrow-mark"></span> HANDS-ON KUBERNETES CERTIFICATION</div><h1 id="dayHeading">Day 01 <span class="dash">/</span> Core Objects</h1><p id="daySubheading">Real cluster. Real kubectl. No simulation.</p></div>
         <div class="heading-controls"><button class="btn ghost" id="doctorBtn">↗ Diagnose</button><button class="btn primary" id="setupBtn">↻ Prepare Lab</button></div>
       </section>
+      <div id="workspaceNotice" class="workspace-notice" role="status">Connecting to your local workspace…</div>
       <section class="overview-grid">
         <article class="metric-card"><div class="metric-name"><span class="small-icon blue">◈</span> Cluster Status</div><div class="metric-value" id="metricCluster">—</div><div class="metric-description" id="metricClusterDesc">Checking Kubernetes API</div></article>
         <article class="metric-card"><div class="metric-name"><span class="small-icon cyan">⬡</span> Cluster Nodes</div><div class="metric-value" id="metricNodes">—</div><div class="metric-description" id="metricNodesDesc">1 control plane · 2 workers</div></article>
@@ -48,17 +48,17 @@
         <section class="left-panel">
           <div class="panel-tabs"><button class="panel-tab active" data-left-tab="tasks">Exercises <span class="tab-badge">05</span></button><button class="panel-tab" data-left-tab="resources">Resources</button><button class="panel-tab" data-left-tab="events">Events</button></div>
           <div class="panel-content" id="tasksPanel"><div class="section-header"><div><h2>Your missions</h2><p>Complete the tasks using the real terminal.</p></div><span class="timer-tag">◷ TIMEBOXED</span></div><div id="taskList" class="task-list"><div class="empty-message">Loading exercises...</div></div></div>
-          <div class="panel-content hidden" id="resourcesPanel"><div class="section-header"><div><h2>Live Kubernetes resources</h2><p id="namespaceLabel">Namespace: cka-d01</p></div><button class="icon-button" id="refreshResources" title="Refresh">↻</button></div><div class="resource-filters"><button class="res-tab active" data-resource="pods">Pods</button><button class="res-tab" data-resource="deployments">Deployments</button><button class="res-tab" data-resource="services">Services</button><button class="res-tab" data-resource="nodes">Nodes</button></div><div id="resourceTable" class="resource-area"></div></div>
+          <div class="panel-content hidden" id="resourcesPanel"><div class="section-header"><div><h2>Live Kubernetes resources</h2><p id="namespaceLabel">Namespace: cka-d01</p></div><button class="icon-button" id="refreshResources" title="Refresh">↻</button></div><p id="resourceUpdated" class="resource-updated" aria-live="polite">Waiting for data</p><div class="resource-filters"><button class="res-tab active" data-resource="pods">Pods</button><button class="res-tab" data-resource="deployments">Deployments</button><button class="res-tab" data-resource="services">Services</button><button class="res-tab" data-resource="nodes">Nodes</button></div><div id="resourceTable" class="resource-area"></div></div>
           <div class="panel-content hidden" id="eventsPanel"><div class="section-header"><div><h2>Namespace events</h2><p>Observed directly from the Kubernetes API</p></div><button class="icon-button" id="refreshEvents" title="Refresh">↻</button></div><div id="eventList" class="event-list"></div></div>
         </section>
         <section class="right-panel">
-          <div class="right-heading"><span class="bullet-cyan"></span> KUBERNETES TERMINAL <span class="terminal-live"><span class="tiny-dot"></span> LIVE SHELL</span></div>
+          <div class="right-heading"><span class="bullet-cyan"></span> KUBERNETES TERMINAL <span class="terminal-live" id="terminalState">DISCONNECTED</span></div>
           <div class="terminal-toolbar"><span><span class="terminal-traffic">● ● ●</span> bash — <span id="terminalContext">kind-cka-14d</span></span><div class="term-actions"><button id="restartTerminal" title="Reconnect terminal">↻</button><button id="clearTerminal" title="Clear terminal">⌫</button></div></div>
           <div id="terminal" aria-label="Interactive local Kubernetes terminal"></div>
-          <div id="fallback" class="hidden"><div id="fallbackOutput" class="fallback-output">Terminal connecting...</div><div class="fallback-input"><span>$</span><input id="fallbackCommand" spellcheck="false" autocomplete="off" placeholder="Type a shell command and press Enter" /></div><small>Full ANSI terminal requires the xterm.js CDN. Commands still run on your own machine.</small></div>
-          <div class="terminal-note"><span class="shield">◇</span> This shell executes on your own machine. Do not expose this app to the internet.</div>
+          <div id="fallback" class="hidden"><div id="fallbackOutput" class="fallback-output">Terminal connecting...</div><div class="fallback-input"><span>$</span><input id="fallbackCommand" spellcheck="false" autocomplete="off" placeholder="Type a shell command and press Enter" /></div><small>Terminal assets could not load. Reload the page to restore the interactive terminal.</small></div>
+          <div class="terminal-note"><span class="shield">◇</span> Isolated lab shell · real kubectl · no host kubeconfig mounted</div>
           <section class="quick-help"><div class="quick-help-title">QUICK COMMANDS</div><div class="quick-chip-row"><button data-cmd="kubectl get pods -o wide\n">get pods <span>↗</span></button><button data-cmd="kubectl get all\n">get all <span>↗</span></button><button data-cmd="kubectl get nodes\n">get nodes <span>↗</span></button><button data-cmd="kubectl get events --sort-by=.metadata.creationTimestamp\n">events <span>↗</span></button></div></section>
-          <div class="grading-panel"><div class="grading-heading"><div><div class="grading-title">Ready to check your work?</div><div class="grading-caption">Evaluate real resources against the task requirements</div></div><span>◎</span></div><button class="btn verify" id="verifyBtn">✓ Verify all tasks <span>→</span></button><button class="link-action" id="resetBtn">Reset this day’s lab</button></div>
+          <div class="grading-panel"><div class="grading-heading"><div><div class="grading-title">Ready to check your work?</div><div class="grading-caption">Evaluate real resources against the task requirements</div></div><span>◎</span></div><button class="btn verify" id="verifyBtn">✓ Verify all tasks <span>→</span></button><button class="link-action" id="cleanupBtn">Clean up this day</button><button class="link-action" id="resetBtn">Reset this day’s lab</button></div>
         </section>
       </div>
       <footer class="page-footer"><span>CKA-KIT <span class="foot-dot">·</span> 14 DAYS OF HANDS-ON PRACTICE</span><span>LOCAL HOST <span class="foot-dot">·</span> NO CLOUD ACCOUNT REQUIRED</span></footer>
@@ -66,7 +66,7 @@
   </main>
 </div>
 <div id="toastArea" aria-live="polite"></div>
-<div class="modal-shade hidden" id="jobModal"><div class="job-dialog"><div class="job-header"><div><div class="job-caption">LAB ACTION</div><h3 id="jobTitle">Preparing your lab</h3></div><button class="modal-close" id="closeJob">✕</button></div><pre id="jobOutput">Starting...</pre><div class="job-footer"><span id="jobState"><span class="spinner"></span> Running...</span><button class="btn ghost" id="jobDone" disabled>Close</button></div></div></div>
-<div class="modal-shade hidden" id="confirmModal"><div class="confirm-dialog"><h3 id="confirmTitle">Reset this lab?</h3><p id="confirmDescription">This will erase existing resources in this day's namespace.</p><div class="confirm-actions"><button id="cancelConfirm" class="btn ghost">Cancel</button><button id="acceptConfirm" class="btn danger">Yes, reset lab</button></div></div></div>
+<div class="modal-shade hidden" id="jobModal" role="dialog" aria-modal="true" aria-labelledby="jobTitle"><div class="job-dialog"><div class="job-header"><div><div class="job-caption">LAB ACTION</div><h3 id="jobTitle">Preparing your lab</h3></div><button class="modal-close" id="closeJob">✕</button></div><pre id="jobOutput">Starting...</pre><div class="job-footer"><span id="jobState"><span class="spinner"></span> Running...</span><button class="btn ghost" id="jobDone" disabled>Close</button></div></div></div>
+<div class="modal-shade hidden" id="confirmModal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle"><div class="confirm-dialog"><h3 id="confirmTitle">Reset this lab?</h3><p id="confirmDescription">This will erase existing resources in this day's namespace.</p><div class="confirm-actions"><button id="cancelConfirm" class="btn ghost">Cancel</button><button id="acceptConfirm" class="btn danger">Yes, reset lab</button></div></div></div>
 </body>
 </html>

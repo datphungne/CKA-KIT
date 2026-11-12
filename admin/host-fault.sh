@@ -7,11 +7,10 @@ source "$ROOT/lib/common.sh"
 require_cmd kubectl
 require_cmd kind
 require_cmd docker
-actual="$(kubectl config current-context 2>/dev/null || true)"
-if [[ "$actual" != "$EXPECTED_CONTEXT" ]]; then
-  echo "REFUSED: active Kubernetes context is '$actual', not '$EXPECTED_CONTEXT'." >&2
-  exit 2
-fi
+# Identity check does not need a healthy API server.
+CKA_SAFE_CONFIG="$(python3 "$ROOT/lib/safety.py")" || exit 2
+export KUBECONFIG="$CKA_SAFE_CONFIG"
+trap 'rm -f -- "$CKA_SAFE_CONFIG"' EXIT
 if [[ $# -ne 3 || "$3" != "--confirm" ]]; then
   echo 'Usage: bash admin/host-fault.sh {kubelet|apiserver|scheduler} {stop|break|restore} --confirm' >&2
   echo 'CAUTION: breaks Kubernetes components in your disposable lab.' >&2

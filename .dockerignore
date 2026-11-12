@@ -1,0 +1,13 @@
+.git
+.venv
+node_modules
+answers
+.runtime
+__pycache__
+**/__pycache__
+*.kubeconfig
+*.snap
+*.db
+.env
+.omc
+.pytest_cache

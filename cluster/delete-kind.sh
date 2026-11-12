@@ -6,4 +6,8 @@ if [[ "${1:-}" != "--confirm-delete" ]]; then
   exit 2
 fi
 command -v kind >/dev/null || exit 1
+# Check node identity even if the Kubernetes API is down.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+config="$(python3 "$ROOT/lib/safety.py")" || exit 2
+trap 'rm -f -- "$config"' EXIT
 kind delete cluster --name cka-14d
