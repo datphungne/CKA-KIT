@@ -1,0 +1,93 @@
+# Progressive help for Day 11. Solutions assume namespace cka-d11 is the default.
+exercises:
+  "11.1":
+    docs:
+      - title: Assign memory resources to containers and Pods
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/assign-memory-resource/
+      - title: Determine the reason for Pod failure
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/determine-reason-pod-failure/
+    hint: >-
+      `kubectl describe pod memory-hog` shows `Last State: Terminated, Reason: OOMKilled`. Limits are
+      immutable on a Pod: export, change `resources.limits.memory` to 512Mi, `replace --force`.
+    automated: true
+    solution: |
+      kubectl get pod memory-hog -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}{"\n"}' || true
+      kubectl get pod memory-hog -o yaml > answers/day11-memory-hog.yaml
+      sed -i 's/memory: 32Mi$/memory: 512Mi/' answers/day11-memory-hog.yaml
+      grep -A2 'limits:' answers/day11-memory-hog.yaml
+      kubectl replace --force -f answers/day11-memory-hog.yaml
+      kubectl wait --for=condition=Ready pod/memory-hog --timeout=180s
+      kubectl logs memory-hog
+  "11.2":
+    docs:
+      - title: Configure liveness, readiness and startup probes
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+    hint: >-
+      nginx listens on 80. Patch only `readinessProbe.httpGet.port` of container `web`.
+    automated: true
+    solution: |
+      kubectl patch deployment probe-failure --type=json \
+        -p '[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/port","value":80}]'
+      kubectl rollout status deployment/probe-failure --timeout=180s
+  "11.3":
+    docs:
+      - title: Debug Services
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-service/
+    hint: >-
+      Set `targetPort` to the container port (80), then request the Service from
+      `diagnostics-client` with `wget -S` to see the status line.
+    automated: true
+    solution: |
+      kubectl patch service web-svc --type=json \
+        -p '[{"op":"replace","path":"/spec/ports/0/targetPort","value":80}]'
+      kubectl exec diagnostics-client -- wget -S -T 5 -O /dev/null http://web-svc 2>&1 | grep 'HTTP/'
+  "11.4":
+    docs:
+      - title: Organizing cluster access using kubeconfig files
+        url: https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/
+      - title: kubectl config view
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_config/kubectl_config_view/
+    hint: >-
+      `kubectl config view --raw --minify` prints the current context with embedded certificates.
+      Point a single command at the copy with `KUBECONFIG=<file> kubectl cluster-info`; the error
+      message names the unreachable server, so compare it with the working one.
+    automated: true
+    solution: |
+      kubectl config view --raw --minify > answers/day11-kubeconfig.yaml
+      GOOD=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+      echo "Working server: $GOOD"
+      # Break the copy only
+      sed -i "s#server: .*#server: https://wrong-endpoint.invalid:6443#" answers/day11-kubeconfig.yaml
+      KUBECONFIG=answers/day11-kubeconfig.yaml kubectl cluster-info --request-timeout=5s || echo "broken as expected"
+      # Diagnose + fix the copy
+      grep 'server:' answers/day11-kubeconfig.yaml
+      sed -i "s#server: .*#server: $GOOD#" answers/day11-kubeconfig.yaml
+      KUBECONFIG=answers/day11-kubeconfig.yaml kubectl cluster-info
+  "11.5":
+    docs:
+      - title: Static Pods
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/
+      - title: Debugging Kubernetes nodes with crictl
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/crictl/
+    hint: >-
+      Without a scheduler, new Pods stay Pending with no events from `default-scheduler`. On the
+      control plane, `crictl logs` of the newest kube-scheduler container names the bad flag; delete
+      that line from `/etc/kubernetes/manifests/kube-scheduler.yaml`.
+    automated: false
+    solution: |
+      # On your machine, in the CKA-KIT folder:
+      docker compose exec console bash admin/host-fault.sh scheduler break --confirm
+
+      # Lab terminal: symptom
+      kubectl run sched-test --image=nginx:1.27
+      sleep 20; kubectl get pod sched-test                      # Pending, no scheduling events
+      kubectl -n kube-system get pods -l component=kube-scheduler
+
+      # On the node: find and remove the bad flag
+      docker exec cka-14d-control-plane sh -c 'crictl logs $(crictl ps -a --latest --name kube-scheduler -q) 2>&1 | tail -3'
+      docker exec cka-14d-control-plane sed -i '/--cka-training-invalid-flag/d' /etc/kubernetes/manifests/kube-scheduler.yaml
+      docker exec cka-14d-control-plane rm -f /var/tmp/cka-fault-backup-kube-scheduler.yaml
+
+      kubectl -n kube-system wait --for=condition=Ready pod -l component=kube-scheduler --timeout=180s
+      kubectl wait --for=condition=Ready pod/sched-test --timeout=120s   # new Pods schedule again
+      kubectl delete pod sched-test

@@ -312,9 +312,9 @@ kubectl -n cka-d04 get pvc mode-claim -o yaml
 
 ## Exercise 04.5 — Reclaim policy (12 min)
 
-**Your mission:** Confirm `cka-d04-local-pv` uses `Retain`. Delete `data-writer` and `data-claim`; examine PV state and retained data on node. Write observations to `answers/day04-reclaim.txt`.
+**Your mission:** Confirm `cka-d04-local-pv` uses `Retain`. Delete `data-writer` and `data-claim`, observe the PV turn `Released`, and write your observations (include the word `Released`) to `answers/day04-reclaim.txt`. Then make the PV `Available` again by clearing its `claimRef`, recreate `data-claim` and `data-writer`, and confirm `/data/proof.txt` survived.
 
-**Pass when:** PV becomes Released (or remains safe during deletion), file still exists on node.
+**Pass when:** PV is `Retain`, the observations file mentions `Released`, and the recreated claim/Pod still read `hello-cka` from the retained volume.
 
 **Check yourself:**
 
@@ -343,6 +343,8 @@ Write down any failed steps and repeat them from a clean `setup.sh`.
 
 > **Admin safety:** Cluster-wide or host actions must be performed only on the dedicated `cka-14d` kind lab or separate throwaway VMs. Read `admin/VM-TRACK.md`.
 
+**Node access:** the lab terminal has no Docker access. Open a shell on a node the way you would `ssh` in the exam: `kubectl debug node/cka-14d-control-plane -it --profile=sysadmin --image=busybox:1.36`, then `chroot /host`. Delete the `node-debugger-*` Pods when you are done.
+
 ## Exercise 05.1 — Inspect kubeadm init setup (15 min)
 
 **Your mission:** On the disposable kind control-plane container, locate `/etc/kubernetes/manifests/` and `/etc/kubernetes/admin.conf`. Save results of `kubeadm version` and `kubectl get nodes` into `answers/day05-cluster.txt`.
@@ -352,7 +354,7 @@ Write down any failed steps and repeat them from a clean `setup.sh`.
 **Check yourself:**
 
 ```bash
-docker exec cka-14d-control-plane kubeadm version
+kubectl debug node/cka-14d-control-plane -it --profile=sysadmin --image=busybox:1.36 -- chroot /host kubeadm version
 ```
 
 ## Exercise 05.2 — Create a join command (12 min)
@@ -364,7 +366,7 @@ docker exec cka-14d-control-plane kubeadm version
 **Check yourself:**
 
 ```bash
-docker exec cka-14d-control-plane kubeadm token list
+kubectl debug node/cka-14d-control-plane -it --profile=sysadmin --image=busybox:1.36 -- chroot /host kubeadm token list
 ```
 
 ## Exercise 05.3 — Static control-plane Pods (12 min)
@@ -376,7 +378,7 @@ docker exec cka-14d-control-plane kubeadm token list
 **Check yourself:**
 
 ```bash
-docker exec cka-14d-control-plane ls /etc/kubernetes/manifests
+kubectl debug node/cka-14d-control-plane -it --profile=sysadmin --image=busybox:1.36 -- chroot /host ls /etc/kubernetes/manifests
 ```
 
 ## Exercise 05.4 — etcd snapshot (20 min)

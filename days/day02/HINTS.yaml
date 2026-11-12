@@ -1,0 +1,158 @@
+# Progressive help for Day 02. Solutions assume namespace cka-d02 is the default.
+exercises:
+  "02.1":
+    docs:
+      - title: Deployments — updating and rolling back
+        url: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+      - title: kubectl rollout
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_rollout/
+    hint: >-
+      `kubectl set image` triggers a new revision; `kubectl rollout undo` returns to the previous
+      one (and creates a new revision number). Check `rollout history` before and after.
+    automated: true
+    solution: |
+      kubectl set image deployment/store nginx=nginx:1.27
+      kubectl rollout status deployment/store --timeout=180s
+      kubectl rollout history deployment/store
+      kubectl rollout undo deployment/store
+      kubectl rollout status deployment/store --timeout=180s
+      kubectl get deployment store -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+  "02.2":
+    docs:
+      - title: Configure a Pod to use a ConfigMap
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
+      - title: Distribute credentials securely using Secrets
+        url: https://kubernetes.io/docs/tasks/inject-data-application/distribute-credentials-secure/
+    hint: >-
+      Create both objects with `--from-literal`. In the Pod use `env[].valueFrom.configMapKeyRef`
+      and `env[].valueFrom.secretKeyRef` (or `envFrom` — but the grader looks for named env vars).
+    automated: true
+    solution: |
+      kubectl create configmap app-config --from-literal=MODE=production
+      kubectl create secret generic app-secret --from-literal=TOKEN=cka123
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: config-test
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          env:
+          - name: MODE
+            valueFrom:
+              configMapKeyRef: {name: app-config, key: MODE}
+          - name: TOKEN
+            valueFrom:
+              secretKeyRef: {name: app-secret, key: TOKEN}
+      EOF
+      kubectl wait --for=condition=Ready pod/config-test --timeout=120s
+      kubectl exec config-test -- printenv MODE TOKEN
+  "02.3":
+    docs:
+      - title: Assign Pods to nodes using node affinity
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/assign-pods-nodes-using-node-affinity/
+      - title: Assigning Pods to nodes
+        url: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/
+    hint: >-
+      `kubectl label node <worker> disk=ssd`. The affinity lives under
+      `spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms`.
+    automated: true
+    solution: |
+      NODE=$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+      echo "Using worker: $NODE"
+      kubectl label node "$NODE" disk=ssd --overwrite
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: ssd-pod
+      spec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - {key: disk, operator: In, values: ["ssd"]}
+        containers:
+        - name: nginx
+          image: nginx:1.27
+      EOF
+      kubectl wait --for=condition=Ready pod/ssd-pod --timeout=120s
+      kubectl get pod ssd-pod -o wide
+  "02.4":
+    docs:
+      - title: Taints and tolerations
+        url: https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
+      - title: kubectl taint
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_taint/
+    hint: >-
+      The toleration must match key, value and effect exactly (`operator: Equal`). Remove a taint
+      by repeating it with a trailing `-`.
+    automated: true
+    solution: |
+      NODE=$(kubectl get nodes -l disk=ssd -o jsonpath='{.items[0].metadata.name}')
+      kubectl taint node "$NODE" dedicated=exam:NoSchedule
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: tolerant-pod
+      spec:
+        tolerations:
+        - {key: dedicated, operator: Equal, value: exam, effect: NoSchedule}
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - {key: disk, operator: In, values: ["ssd"]}
+        containers:
+        - name: nginx
+          image: nginx:1.27
+      EOF
+      kubectl wait --for=condition=Ready pod/tolerant-pod --timeout=120s
+      kubectl get pod tolerant-pod -o wide
+      # Clean up the taint once verified.
+      kubectl taint node "$NODE" dedicated=exam:NoSchedule-
+  "02.5":
+    docs:
+      - title: Configure liveness, readiness and startup probes
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+      - title: Resource management for Pods and containers
+        url: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+    hint: >-
+      Start from `kubectl create deployment healthy-web --image=nginx:1.27 --replicas=2
+      --dry-run=client -o yaml`, then add `readinessProbe`/`livenessProbe` with `httpGet` and a
+      `resources` block to the container.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: healthy-web
+      spec:
+        replicas: 2
+        selector:
+          matchLabels: {app: healthy-web}
+        template:
+          metadata:
+            labels: {app: healthy-web}
+          spec:
+            containers:
+            - name: nginx
+              image: nginx:1.27
+              ports:
+              - containerPort: 80
+              readinessProbe:
+                httpGet: {path: /, port: 80}
+              livenessProbe:
+                httpGet: {path: /, port: 80}
+              resources:
+                requests: {cpu: 100m}
+                limits: {memory: 128Mi}
+      EOF
+      kubectl rollout status deployment/healthy-web --timeout=180s

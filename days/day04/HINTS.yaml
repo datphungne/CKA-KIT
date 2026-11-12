@@ -1,0 +1,200 @@
+# Progressive help for Day 04. Solutions assume namespace cka-d04 is the default.
+exercises:
+  "04.1":
+    docs:
+      - title: Persistent Volumes
+        url: https://kubernetes.io/docs/concepts/storage/persistent-volumes/
+      - title: Local volumes
+        url: https://kubernetes.io/docs/concepts/storage/volumes/#local
+    hint: >-
+      A `local` PV needs `spec.local.path` plus a required `nodeAffinity` on
+      `kubernetes.io/hostname`. The PVC binds to it when `storageClassName` matches and
+      `spec.volumeName` names the PV.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        name: cka-d04-local-pv
+      spec:
+        capacity: {storage: 1Gi}
+        accessModes: [ReadWriteOnce]
+        persistentVolumeReclaimPolicy: Retain
+        storageClassName: manual
+        volumeMode: Filesystem
+        local:
+          path: /var/local/cka-d04
+        nodeAffinity:
+          required:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - {key: kubernetes.io/hostname, operator: In, values: [cka-14d-worker]}
+      ---
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data-claim
+      spec:
+        storageClassName: manual
+        volumeName: cka-d04-local-pv
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 500Mi}
+      EOF
+      kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/data-claim --timeout=60s
+      kubectl get pv cka-d04-local-pv
+  "04.2":
+    docs:
+      - title: Configure a Pod to use a PersistentVolume
+        url: https://kubernetes.io/docs/tutorials/configuration/configure-persistent-volume-storage/
+    hint: >-
+      Reference the claim in `spec.volumes[].persistentVolumeClaim.claimName` and mount it with
+      `volumeMounts`. Keep the manifest in a file so recreating the Pod is a single `apply`.
+    automated: true
+    solution: |
+      cat > answers/day04-data-writer.yaml <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: data-writer
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          volumeMounts:
+          - {name: data, mountPath: /data}
+        volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: data-claim}
+      EOF
+      kubectl apply -f answers/day04-data-writer.yaml
+      kubectl wait --for=condition=Ready pod/data-writer --timeout=120s
+      kubectl exec data-writer -- sh -c 'echo hello-cka > /data/proof.txt'
+      kubectl delete pod data-writer --wait=true
+      kubectl apply -f answers/day04-data-writer.yaml
+      kubectl wait --for=condition=Ready pod/data-writer --timeout=120s
+      kubectl exec data-writer -- cat /data/proof.txt
+  "04.3":
+    docs:
+      - title: Dynamic volume provisioning
+        url: https://kubernetes.io/docs/concepts/storage/dynamic-provisioning/
+      - title: Storage Classes
+        url: https://kubernetes.io/docs/concepts/storage/storage-classes/
+    hint: >-
+      `kubectl get storageclass` shows the default class (`standard` on kind). Its
+      `volumeBindingMode: WaitForFirstConsumer` keeps the PVC Pending until a Pod uses it.
+    automated: true
+    solution: |
+      kubectl get storageclass
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: dynamic-claim
+      spec:
+        storageClassName: standard
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 1Gi}
+      ---
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: dynamic-reader
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          volumeMounts:
+          - {name: data, mountPath: /data}
+        volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: dynamic-claim}
+      EOF
+      kubectl wait --for=condition=Ready pod/dynamic-reader --timeout=180s
+      kubectl get pvc dynamic-claim
+  "04.4":
+    docs:
+      - title: Access modes
+        url: https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes
+      - title: Volume mode
+        url: https://kubernetes.io/docs/concepts/storage/persistent-volumes/#volume-mode
+    hint: >-
+      Set `accessModes: [ReadWriteOnce]` and `volumeMode: Filesystem` explicitly. With a
+      `WaitForFirstConsumer` class the claim only binds (and gets a PV to inspect) once a Pod mounts it.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: mode-claim
+      spec:
+        storageClassName: standard
+        accessModes: [ReadWriteOnce]
+        volumeMode: Filesystem
+        resources:
+          requests: {storage: 200Mi}
+      ---
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: mode-checker
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          volumeMounts:
+          - {name: data, mountPath: /data}
+        volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: mode-claim}
+      EOF
+      kubectl wait --for=condition=Ready pod/mode-checker --timeout=180s
+      kubectl describe pvc mode-claim
+      kubectl get pv "$(kubectl get pvc mode-claim -o jsonpath='{.spec.volumeName}')" \
+        -o custom-columns=NAME:.metadata.name,MODES:.spec.accessModes,VOLMODE:.spec.volumeMode,RECLAIM:.spec.persistentVolumeReclaimPolicy
+  "04.5":
+    docs:
+      - title: Reclaiming (Retain / Delete)
+        url: https://kubernetes.io/docs/concepts/storage/persistent-volumes/#reclaiming
+      - title: Change the reclaim policy of a PersistentVolume
+        url: https://kubernetes.io/docs/tasks/administer-cluster/change-pv-reclaim-policy/
+    hint: >-
+      After the claim is deleted a `Retain` PV goes `Released` and keeps `spec.claimRef`, so no new
+      claim can bind. Remove the claimRef (`kubectl patch pv ... --type=json` with a `remove` op) to
+      make it `Available`, then recreate the PVC and Pod from 04.1/04.2.
+    automated: true
+    solution: |
+      kubectl get pv cka-d04-local-pv -o jsonpath='{.spec.persistentVolumeReclaimPolicy}{"\n"}'
+      kubectl delete pod data-writer --wait=true
+      kubectl delete pvc data-claim --wait=true
+      kubectl wait --for=jsonpath='{.status.phase}'=Released pv/cka-d04-local-pv --timeout=60s
+      {
+        echo "Reclaim policy: Retain"
+        echo "After deleting data-claim the PV phase is: $(kubectl get pv cka-d04-local-pv -o jsonpath='{.status.phase}')"
+        echo "Released PVs keep their data and claimRef; they are not rebound automatically."
+      } | tee answers/day04-reclaim.txt
+      # Make the retained volume reusable and bind it again.
+      kubectl patch pv cka-d04-local-pv --type=json -p '[{"op":"remove","path":"/spec/claimRef"}]'
+      kubectl wait --for=jsonpath='{.status.phase}'=Available pv/cka-d04-local-pv --timeout=60s
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: data-claim
+      spec:
+        storageClassName: manual
+        volumeName: cka-d04-local-pv
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 500Mi}
+      EOF
+      kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/data-claim --timeout=60s
+      kubectl apply -f answers/day04-data-writer.yaml   # manifest saved in 04.2
+      kubectl wait --for=condition=Ready pod/data-writer --timeout=120s
+      kubectl exec data-writer -- cat /data/proof.txt   # still hello-cka

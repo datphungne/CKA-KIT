@@ -1,0 +1,126 @@
+# Progressive help for Day 08. Solutions assume namespace cka-d08 is the default.
+exercises:
+  "08.1":
+    docs:
+      - title: Debug Services
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-service/
+      - title: Service — defining a Service (port vs targetPort)
+        url: https://kubernetes.io/docs/concepts/services-networking/service/#defining-a-service
+    hint: >-
+      The EndpointSlice lists port 8081 while the container exposes 80. `targetPort` must be the port
+      the container listens on; `port` is what clients call.
+    automated: true
+    solution: |
+      kubectl get endpointslice -l kubernetes.io/service-name=upstream-svc -o jsonpath='{.items[0].ports}{"\n"}'
+      kubectl get pods -l app=upstream -o jsonpath='{.items[0].spec.containers[0].ports}{"\n"}'
+      kubectl patch service upstream-svc --type=json \
+        -p '[{"op":"replace","path":"/spec/ports/0/targetPort","value":80}]'
+      kubectl run http-check --rm -i --restart=Never --image=busybox:1.36 -- \
+        wget -T 5 -q -O /dev/null http://upstream-svc && echo "upstream-svc OK"
+  "08.2":
+    docs:
+      - title: Debugging DNS resolution
+        url: https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/
+      - title: DNS for Services and Pods
+        url: https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/
+    hint: >-
+      Resolve from inside the cluster with `kubectl exec net-client -- nslookup <fqdn>`. CoreDNS
+      lives in `kube-system`: Service `kube-dns`, Deployment `coredns`, Pods labelled `k8s-app=kube-dns`.
+    automated: true
+    solution: |
+      kubectl exec net-client -- nslookup dns-backend-svc.cka-d08.svc.cluster.local | tee answers/day08-dns.txt
+      kubectl -n kube-system get service kube-dns
+      kubectl -n kube-system get deployment coredns
+      kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide
+      kubectl -n kube-system logs deployment/coredns --tail=20
+  "08.3":
+    docs:
+      - title: Assigning Pods to nodes — node affinity
+        url: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#node-affinity
+      - title: kubectl cordon
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cordon/
+    hint: >-
+      Pin with required affinity on `kubernetes.io/hostname`. While the node is cordoned the Pod
+      stays Pending with `node(s) were unschedulable`; `kubectl uncordon` lets the scheduler place it.
+    automated: true
+    solution: |
+      NODE=$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+      kubectl cordon "$NODE"
+      kubectl apply -f - <<EOF
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: pinned-app
+      spec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - {key: kubernetes.io/hostname, operator: In, values: ["$NODE"]}
+        containers:
+        - name: nginx
+          image: nginx:1.27
+      EOF
+      sleep 5
+      kubectl get pod pinned-app                                   # Pending
+      kubectl describe pod pinned-app | grep -i unschedulable || true
+      kubectl uncordon "$NODE"
+      kubectl wait --for=condition=Ready pod/pinned-app --timeout=120s
+      kubectl get pod pinned-app -o wide
+  "08.4":
+    docs:
+      - title: Troubleshooting clusters
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/
+      - title: Node status (conditions, NotReady)
+        url: https://kubernetes.io/docs/reference/node/node-status/
+    hint: >-
+      The fault script needs Docker, so run it from your own machine through the console container
+      (`docker compose exec console bash admin/host-fault.sh ...`). A node goes NotReady about 40 s
+      after kubelet stops; on the node, `systemctl status kubelet` and `journalctl -u kubelet` tell
+      you why. Fix it like in the exam: `systemctl start kubelet`.
+    automated: false
+    solution: |
+      # On your machine, in the CKA-KIT folder (not the lab terminal):
+      docker compose exec console bash admin/host-fault.sh kubelet stop --confirm
+
+      # Lab terminal: diagnose
+      kubectl get nodes -w                          # cka-14d-worker2 -> NotReady (Ctrl+C)
+      kubectl describe node cka-14d-worker2 | grep -A6 Conditions   # "Kubelet stopped posting node status"
+
+      # On the node (the exam equivalent of ssh): repair
+      docker exec cka-14d-worker2 systemctl status kubelet --no-pager
+      docker exec cka-14d-worker2 systemctl start kubelet
+      #   ...or use the kit's restore action:
+      #   docker compose exec console bash admin/host-fault.sh kubelet restore --confirm
+
+      kubectl wait --for=condition=Ready node/cka-14d-worker2 --timeout=120s
+  "08.5":
+    docs:
+      - title: Static Pods
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/
+      - title: Debugging Kubernetes nodes with crictl
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/crictl/
+    hint: >-
+      With the API server down `kubectl` is useless — debug on the node. `crictl ps -a` shows the
+      kube-apiserver container exiting; `crictl logs` of the newest one (`crictl ps -a --latest`) names the bad flag. Remove that line from
+      `/etc/kubernetes/manifests/kube-apiserver.yaml`; kubelet recreates the static Pod by itself.
+    automated: false
+    solution: |
+      # On your machine, in the CKA-KIT folder:
+      docker compose exec console bash admin/host-fault.sh apiserver break --confirm
+
+      kubectl get --raw /readyz                      # fails: connection refused
+      sleep 40   # give kubelet time to restart the static Pod with the bad manifest
+      docker exec cka-14d-control-plane crictl ps -a --name kube-apiserver            # state: Exited
+      # --latest = the newest container, i.e. the one started from the broken manifest
+      docker exec cka-14d-control-plane sh -c 'crictl logs $(crictl ps -a --latest --name kube-apiserver -q) 2>&1 | tail -3'
+      #   -> "unknown flag: --cka-training-invalid-flag"
+
+      # Repair the manifest exactly as in the exam:
+      docker exec cka-14d-control-plane sed -i '/--cka-training-invalid-flag/d' /etc/kubernetes/manifests/kube-apiserver.yaml
+      # Remove the kit's backup so the next drill can run (or use "apiserver restore" instead of sed):
+      docker exec cka-14d-control-plane rm -f /var/tmp/cka-fault-backup-kube-apiserver.yaml
+
+      until kubectl get --raw /readyz >/dev/null 2>&1; do sleep 5; done; echo "API server is back"
+      kubectl get nodes

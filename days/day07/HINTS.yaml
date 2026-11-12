@@ -1,0 +1,83 @@
+# Progressive help for Day 07. Solutions assume namespace cka-d07 is the default.
+exercises:
+  "07.1":
+    docs:
+      - title: Debug running Pods
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/
+      - title: Determine the reason for Pod failure
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/determine-reason-pod-failure/
+    hint: >-
+      `kubectl describe pod` and `kubectl logs --previous` show why it exits. Most Pod spec fields
+      are immutable: export the YAML, fix `command`, then `kubectl replace --force -f` (delete +
+      create in one step).
+    automated: true
+    solution: |
+      kubectl describe pod broken-app | grep -A3 'Last State' || true
+      kubectl get pod broken-app -o yaml > answers/day07-broken-app.yaml
+      sed -i 's/- exit 1$/- sleep 86400/' answers/day07-broken-app.yaml
+      grep -A3 'command:' answers/day07-broken-app.yaml
+      kubectl replace --force -f answers/day07-broken-app.yaml
+      kubectl wait --for=condition=Ready pod/broken-app --timeout=120s
+  "07.2":
+    docs:
+      - title: Images — image pull errors
+        url: https://kubernetes.io/docs/concepts/containers/images/#imagepullbackoff
+      - title: kubectl set image
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_set/kubectl_set_image/
+    hint: >-
+      The Events of the failing Pod name the tag that does not exist. `kubectl set image
+      deployment/<name> <container>=<image>` fixes the template and triggers a rollout.
+    automated: true
+    solution: |
+      kubectl get pods -l app=broken-image
+      kubectl describe pods -l app=broken-image | grep -E 'Failed|Back-off' || true
+      kubectl set image deployment/broken-image nginx=nginx:1.27
+      kubectl rollout status deployment/broken-image --timeout=180s
+  "07.3":
+    docs:
+      - title: Resource management for Pods and containers
+        url: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+      - title: Debug Pods (Pending)
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-pods/
+    hint: >-
+      `kubectl describe pod pending-app` shows `Insufficient cpu` from the scheduler. Requests are
+      immutable on a running Pod — edit an exported copy and `kubectl replace --force`.
+    automated: true
+    solution: |
+      kubectl describe pod pending-app | grep -A5 Events
+      kubectl get pod pending-app -o yaml > answers/day07-pending-app.yaml
+      # The API server normalises "1000" cores to 1k in the exported YAML.
+      sed -i -E 's/cpu: ("1000"|1k)$/cpu: 100m/' answers/day07-pending-app.yaml
+      grep -A2 'requests:' answers/day07-pending-app.yaml
+      kubectl replace --force -f answers/day07-pending-app.yaml
+      kubectl wait --for=condition=Ready pod/pending-app --timeout=120s
+  "07.4":
+    docs:
+      - title: Debug Services
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-service/
+      - title: EndpointSlices
+        url: https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/
+    hint: >-
+      Compare `kubectl get svc backend-svc -o jsonpath='{.spec.selector}'` with
+      `kubectl get pods --show-labels`. An empty EndpointSlice almost always means a selector mismatch.
+    automated: true
+    solution: |
+      kubectl get svc backend-svc -o jsonpath='{.spec.selector}{"\n"}'
+      kubectl get pods --show-labels | grep backend
+      kubectl patch service backend-svc -p '{"spec":{"selector":{"app":"backend"}}}'
+      kubectl get endpointslice -l kubernetes.io/service-name=backend-svc
+  "07.5":
+    docs:
+      - title: Configure liveness, readiness and startup probes
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+      - title: Update API objects in place using kubectl patch
+        url: https://kubernetes.io/docs/tasks/manage-kubernetes-objects/update-api-object-kubectl-patch/
+    hint: >-
+      `kubectl describe pod` shows `Readiness probe failed ... :9999`. Change only
+      `readinessProbe.httpGet.port` (a JSON patch on that exact path, or `kubectl edit`).
+    automated: true
+    solution: |
+      kubectl describe pods -l app=broken-probe | grep -m1 'Readiness probe failed' || true
+      kubectl patch deployment broken-probe --type=json \
+        -p '[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/port","value":80}]'
+      kubectl rollout status deployment/broken-probe --timeout=180s

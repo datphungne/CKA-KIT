@@ -29,8 +29,9 @@ Open **http://127.0.0.1:8765**, pick a day and press **Create cluster & start** 
 2. **Start Lab** seeds that namespace with the day's broken workloads. Starting a day again resets only that namespace.
 3. **Solve in the terminal.** The shell opens with the day's namespace as default, `k=kubectl`, tab completion, `vim`, `helm` and `$do` (`--dry-run=client -o yaml`). Save evidence files under `/workspace/answers` (persisted in a Docker volume).
 4. **Resources / Events** tabs show live API data for the namespace. If the API is unreachable they say *Disconnected* instead of showing an empty list.
-5. **Verify all tasks** runs `days/dayXX/verify.sh` against live cluster state and marks each task PASS / FAIL / MANUAL. Results are kept in your browser only.
-6. **Clean up this day** deletes the namespace, uncordons the workers and removes the Day 02 scheduling taint/label.
+5. **Stuck?** Every exercise has two levels of help under its description. **💡 Hint** shows links into the documentation you may open during the real exam (kubernetes.io/docs, helm.sh/docs, gateway-api.sigs.k8s.io — check the current Candidate Handbook) plus a one-line nudge. **🔑 Solution** shows a complete, commented reference answer with a Copy button. Solutions tagged **verified** are executed against the grader by the test suite.
+6. **Verify all tasks** runs `days/dayXX/verify.sh` against live cluster state and marks each task PASS / FAIL / MANUAL. Results are kept in your browser only.
+7. **Clean up this day** deletes the namespace, uncordons the workers and removes the Day 02 scheduling taint/label.
 
 ### Stop, resume, remove
 
@@ -85,7 +86,9 @@ Browser ── 127.0.0.1:8765 ──► console container (FastAPI)
 | 06 | Maintenance, RBAC, Helm | 13 | Final speed drills |
 | 07 | App troubleshooting | 14 | Final mock |
 
-All 70 instructions are in `WORKBOOK.md` and in the **Exercises** tab. Each `days/dayXX/` folder contains `TASKS.md`, `setup.sh`, `verify.sh` and `cleanup.sh`.
+All 70 instructions are in `WORKBOOK.md` and in the **Exercises** tab. Each `days/dayXX/` folder contains `TASKS.md`, `setup.sh`, `verify.sh`, `cleanup.sh` and `HINTS.yaml` (docs links, hint and reference solution per exercise). 61 of the 70 solutions are machine-verified against the grader. The other 9 are the MANUAL tasks (VM-only work, optional Ingress/Gateway controllers, etcd snapshots and host-level fault drills); their solutions were run by hand on the kind lab where possible.
+
+Node-level work (Day 05 and the admin parts of the mock exams) happens from the lab terminal the way you would `ssh` in the exam: `kubectl debug node/cka-14d-control-plane -it --profile=sysadmin --image=busybox:1.36`, then `chroot /host`. The fault drills in days 08/11/12 (`admin/host-fault.sh`) need Docker and run from your own machine: `docker compose exec console bash admin/host-fault.sh ...`.
 
 ## Pinned versions
 
@@ -100,6 +103,8 @@ python -m pytest                                  # unit + contract tests, no cl
 # Full lifecycle on a real cluster (setup → verify → cleanup for all 14 days, ~11 min):
 docker compose up -d --build                      # then create the cluster once in the UI
 CKA_INTEGRATION=1 python -m pytest tests/test_integration.py -v
+CKA_INTEGRATION=1 python -m pytest tests/test_solutions.py -v   # every verified solution must PASS (~25 min)
+CKA_LINKCHECK=1 python -m pytest tests/test_hints.py -k doc_links  # all docs links resolve
 ```
 
 The unit suite covers the cluster-identity guard, the HTTP/WebSocket contract (origin checks, action allow-list, single-action lock), terminal container isolation flags, shell-script syntax, namespace validation and grader coverage. The integration suite also asserts that a freshly seeded day never auto-passes a task, that a container on the kind network gets 403 from the console, and that a kubeconfig with an `exec` plugin is rejected without running it.

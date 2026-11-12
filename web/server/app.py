@@ -43,6 +43,7 @@ JOB_TTL = 3600
 sys.path.insert(0, str(ROOT / 'lib'))
 from safety import snapshot, trusted_config
 from netguard import from_lab_network, lab_networks
+from hints import HintError, load_hints
 
 MAX_TERMINALS = 4
 
@@ -167,7 +168,14 @@ def status():
 
 @app.get('/api/day/{day}')
 def get_day(day: int):
-    return {'day': safe_day(day), 'namespace': namespace(day), 'markdown': iso_day(day)}
+    safe_day(day)
+    try:
+        hints = load_hints(day)
+    except (HintError, OSError, ValueError) as exc:
+        hints, hint_error = {}, str(exc)
+    else:
+        hint_error = ''
+    return {'day': day, 'namespace': namespace(day), 'markdown': iso_day(day), 'hints': hints, 'hintError': hint_error}
 
 
 @app.get('/api/resources/{day}')

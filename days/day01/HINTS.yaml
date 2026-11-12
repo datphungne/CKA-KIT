@@ -1,0 +1,89 @@
+# Progressive help for Day 01. Level 1 = exam-allowed docs + nudge, level 2 = reference solution.
+# Solutions assume the lab terminal: namespace cka-d01 is the default, cwd is /workspace.
+exercises:
+  "01.1":
+    docs:
+      - title: kubectl quick reference
+        url: https://kubernetes.io/docs/reference/kubectl/quick-reference/
+      - title: kubectl run
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_run/
+      - title: Pods
+        url: https://kubernetes.io/docs/concepts/workloads/pods/
+    hint: >-
+      `kubectl run` creates a Pod and can set image, label and port in one line, but it names the
+      container after the Pod. Generate YAML with `--dry-run=client -o yaml`, rename the container to
+      `web`, then apply.
+    automated: true
+    solution: |
+      kubectl run web-pod --image=nginx:1.27 --labels=app=web --port=80 \
+        --dry-run=client -o yaml > /tmp/web-pod.yaml
+      # The generated container is called "web-pod"; the task wants "web".
+      # (metadata.name is indented 2 spaces, the container name 4 — only rename the container.)
+      sed -i 's/^    name: web-pod$/    name: web/' /tmp/web-pod.yaml
+      grep -n 'name:' /tmp/web-pod.yaml
+      kubectl apply -f /tmp/web-pod.yaml
+      kubectl wait --for=condition=Ready pod/web-pod --timeout=120s
+      kubectl get pod web-pod -o wide
+  "01.2":
+    docs:
+      - title: Deployments
+        url: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+      - title: kubectl scale
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_scale/
+    hint: >-
+      `kubectl create deployment` accepts `--replicas`. Use `kubectl scale` twice and
+      `kubectl rollout status` to wait until the Deployment settles.
+    automated: true
+    solution: |
+      kubectl create deployment frontend --image=nginx:1.27 --replicas=3
+      kubectl rollout status deployment/frontend --timeout=120s
+      kubectl scale deployment frontend --replicas=5
+      kubectl rollout status deployment/frontend --timeout=120s
+      kubectl scale deployment frontend --replicas=3
+      kubectl rollout status deployment/frontend --timeout=120s
+      kubectl get deployment frontend
+  "01.3":
+    docs:
+      - title: kubectl usage conventions (dry-run)
+        url: https://kubernetes.io/docs/reference/kubectl/conventions/
+      - title: kubectl run
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_run/
+    hint: >-
+      `--dry-run=client -o yaml` prints the object instead of creating it. Redirect that output to
+      `answers/day01-cache.yaml`, then `kubectl apply -f` the file.
+    automated: true
+    solution: |
+      kubectl run cache-pod --image=redis:7 --dry-run=client -o yaml > answers/day01-cache.yaml
+      kubectl apply -f answers/day01-cache.yaml
+      kubectl wait --for=condition=Ready pod/cache-pod --timeout=180s
+  "01.4":
+    docs:
+      - title: Labels and selectors
+        url: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
+      - title: kubectl quick reference
+        url: https://kubernetes.io/docs/reference/kubectl/quick-reference/
+    hint: >-
+      Filter with `-l tier=frontend` and print bare names with `-o name` (strip the `pod/` prefix)
+      or `-o custom-columns=NAME:.metadata.name --no-headers`. Pipe through `sort`.
+    automated: true
+    solution: |
+      kubectl get pods -l tier=frontend -o custom-columns=NAME:.metadata.name --no-headers \
+        | sort > answers/day01-frontend.txt
+      cat answers/day01-frontend.txt
+  "01.5":
+    docs:
+      - title: JSONPath support
+        url: https://kubernetes.io/docs/reference/kubectl/jsonpath/
+      - title: kubectl quick reference
+        url: https://kubernetes.io/docs/reference/kubectl/quick-reference/
+    hint: >-
+      A `range` JSONPath prints one item per line: `{range .items[*]}{.metadata.name}{"\n"}{end}`.
+      Do this exercise last so the file includes the Pods you created, and wait for scaled-down Pods
+      to finish terminating.
+    automated: true
+    solution: |
+      # Pods removed by "scale --replicas=3" may still be terminating; let them go first.
+      while kubectl get pods --no-headers | grep -q Terminating; do sleep 2; done
+      kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+        | sort > answers/day01-pods.txt
+      cat answers/day01-pods.txt

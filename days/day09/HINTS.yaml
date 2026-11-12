@@ -1,0 +1,125 @@
+# Progressive help for Day 09 (speed challenge). Solutions assume namespace cka-d09 is the default.
+exercises:
+  "09.1":
+    docs:
+      - title: Deployments — rolling update strategy
+        url: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#rolling-update-deployment
+    hint: >-
+      Generate with `kubectl create deployment ... --dry-run=client -o yaml`, then add
+      `spec.strategy.type: RollingUpdate` and `rollingUpdate: {maxUnavailable: 1, maxSurge: 1}`.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: payments
+      spec:
+        replicas: 4
+        strategy:
+          type: RollingUpdate
+          rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
+        selector:
+          matchLabels: {app: payments}
+        template:
+          metadata:
+            labels: {app: payments}
+          spec:
+            containers:
+            - name: nginx
+              image: nginx:1.27
+      EOF
+      kubectl rollout status deployment/payments --timeout=180s
+  "09.2":
+    docs:
+      - title: Using RBAC authorization
+        url: https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+    hint: >-
+      Three imperative commands: `create serviceaccount`, `create role --verb=get,list
+      --resource=configmaps`, `create rolebinding --serviceaccount=cka-d09:viewer`.
+    automated: true
+    solution: |
+      kubectl create serviceaccount viewer
+      kubectl create role config-reader --verb=get,list --resource=configmaps
+      kubectl create rolebinding viewer-config --role=config-reader --serviceaccount=cka-d09:viewer
+      kubectl auth can-i list configmaps --as=system:serviceaccount:cka-d09:viewer               # yes
+      kubectl auth can-i get secrets --as=system:serviceaccount:cka-d09:viewer || true           # no
+  "09.3":
+    docs:
+      - title: Network Policies
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/
+    hint: >-
+      Same shape as Day 03: `podSelector` = `app=db`, one ingress rule `from: podSelector role=api`,
+      `ports: TCP 80`. Test with `kubectl exec <client> -- wget -T 3 <db-pod-ip>`.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: db-allow-api
+      spec:
+        podSelector:
+          matchLabels: {app: db}
+        policyTypes: [Ingress]
+        ingress:
+        - from:
+          - podSelector:
+              matchLabels: {role: api}
+          ports:
+          - {protocol: TCP, port: 80}
+      EOF
+      DB_IP=$(kubectl get pods -l app=db -o jsonpath='{.items[0].status.podIP}')
+      sleep 5
+      kubectl exec role-client -- wget -T 3 -q -O /dev/null "http://$DB_IP" && echo "role-client: allowed"
+      kubectl exec random-client -- wget -T 3 -q -O /dev/null "http://$DB_IP" || echo "random-client: blocked"
+  "09.4":
+    docs:
+      - title: Configure a Pod to use a PersistentVolume
+        url: https://kubernetes.io/docs/tutorials/configuration/configure-persistent-volume-storage/
+      - title: Dynamic volume provisioning
+        url: https://kubernetes.io/docs/concepts/storage/dynamic-provisioning/
+    hint: >-
+      Use the default `standard` class; the claim binds once `payments-writer` mounts it
+      (WaitForFirstConsumer).
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: payments-data
+      spec:
+        storageClassName: standard
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 2Gi}
+      ---
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: payments-writer
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          volumeMounts:
+          - {name: data, mountPath: /var/lib/data}
+        volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: payments-data}
+      EOF
+      kubectl wait --for=condition=Ready pod/payments-writer --timeout=180s
+      kubectl get pvc payments-data
+  "09.5":
+    docs:
+      - title: Debug Services
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-service/
+    hint: >-
+      Look up the labels of the `api` Pods and set the Service selector to match them exactly.
+    automated: true
+    solution: |
+      kubectl get deployment api -o jsonpath='{.spec.selector.matchLabels}{"\n"}'
+      kubectl patch service bad-svc -p '{"spec":{"selector":{"app":"api"}}}'
+      kubectl get endpointslice -l kubernetes.io/service-name=bad-svc

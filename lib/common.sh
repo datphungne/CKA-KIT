@@ -32,6 +32,9 @@ cleanup_day() {
   ns="$(ns_for_day "$1")"
   kubectl delete namespace "$ns" --ignore-not-found --wait=true --timeout=120s
   restore_day_nodes "$1"
+  if [[ "$1" == 04 ]]; then
+    kubectl delete pv cka-d04-local-pv --ignore-not-found --wait=false
+  fi
   if [[ "$1" == 06 ]]; then
     kubectl delete clusterrole,clusterrolebinding cka-d06-node-reader --ignore-not-found
   fi

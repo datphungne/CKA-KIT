@@ -1,0 +1,129 @@
+# Progressive help for Day 03. Solutions assume namespace cka-d03 is the default.
+exercises:
+  "03.1":
+    docs:
+      - title: Service
+        url: https://kubernetes.io/docs/concepts/services-networking/service/
+      - title: kubectl expose
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_expose/
+    hint: >-
+      `kubectl expose deployment api` copies the Deployment's selector for you; set `--port` (the
+      Service port) and `--target-port` (the container port) separately.
+    automated: true
+    solution: |
+      kubectl expose deployment api --name=api-svc --port=8080 --target-port=80
+      kubectl get endpointslice -l kubernetes.io/service-name=api-svc
+      # In-cluster check: expect HTTP 200
+      kubectl run curl-check --rm -i --restart=Never --image=busybox:1.36 -- \
+        wget -S -O /dev/null http://api-svc:8080 2>&1 | grep 'HTTP/'
+  "03.2":
+    docs:
+      - title: Service type NodePort
+        url: https://kubernetes.io/docs/concepts/services-networking/service/#type-nodeport
+      - title: kubectl patch (update objects in place)
+        url: https://kubernetes.io/docs/tasks/manage-kubernetes-objects/update-api-object-kubectl-patch/
+    hint: >-
+      `kubectl expose --type=NodePort` cannot choose the node port. Expose first, then patch
+      `spec.ports[0].nodePort` to 30080 — or write the Service YAML with `nodePort: 30080`.
+    automated: true
+    solution: |
+      kubectl expose deployment frontend --name=frontend-nodeport --type=NodePort --port=80 --target-port=80
+      kubectl patch service frontend-nodeport -p '{"spec":{"ports":[{"port":80,"nodePort":30080}]}}'
+      kubectl get service frontend-nodeport
+      # From your own machine (not the lab terminal), kind maps the port to localhost:
+      #   curl -I http://127.0.0.1:30080
+  "03.3":
+    docs:
+      - title: DNS for Services and Pods
+        url: https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/
+      - title: Debugging DNS resolution
+        url: https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/
+    hint: >-
+      Service FQDNs look like `<service>.<namespace>.svc.cluster.local`. Run `nslookup` inside
+      `dns-client` with `kubectl exec` and redirect the output into the answers file.
+    automated: true
+    solution: |
+      kubectl expose deployment database --port=80
+      kubectl exec dns-client -- nslookup database.cka-d03.svc.cluster.local | tee answers/day03-dns.txt
+  "03.4":
+    docs:
+      - title: Network Policies
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/
+      - title: Declare Network Policy
+        url: https://kubernetes.io/docs/tasks/administer-cluster/declare-network-policy/
+    hint: >-
+      `spec.podSelector` picks the protected Pods (`app=database`). With `policyTypes: [Ingress]`
+      everything not listed is denied; allow `from: podSelector role=frontend` on `TCP/80`.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: database-ingress
+      spec:
+        podSelector:
+          matchLabels: {app: database}
+        policyTypes: [Ingress]
+        ingress:
+        - from:
+          - podSelector:
+              matchLabels: {role: frontend}
+          ports:
+          - {protocol: TCP, port: 80}
+      EOF
+      sleep 5   # give Calico a moment to program the rule
+      kubectl exec trusted -- wget -T 3 -q -O /dev/null http://database && echo "trusted: allowed"
+      kubectl exec outsider -- wget -T 3 -q -O /dev/null http://database && echo "outsider: allowed (WRONG)" || echo "outsider: blocked"
+  "03.5":
+    docs:
+      - title: Ingress
+        url: https://kubernetes.io/docs/concepts/services-networking/ingress/
+      - title: Gateway API (Kubernetes docs)
+        url: https://kubernetes.io/docs/concepts/services-networking/gateway/
+      - title: HTTPRoute
+        url: https://gateway-api.sigs.k8s.io/reference/api-types/httproute/
+    hint: >-
+      Objects alone route nothing: install an Ingress controller and a Gateway API implementation
+      first (see cluster/addons.md). `ingressClassName` and the HTTPRoute `parentRefs` must point at
+      what you installed. Test with `curl -H 'Host: cka.local'` against the controller.
+    automated: false
+    solution: |
+      # Prerequisite: a controller is installed (cluster/addons.md). Check what you have:
+      kubectl get ingressclass
+      kubectl get gatewayclass 2>/dev/null || echo "Gateway API CRDs not installed"
+
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: api-ingress
+      spec:
+        ingressClassName: nginx          # use the name from "kubectl get ingressclass"
+        rules:
+        - host: cka.local
+          http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service: {name: api-svc, port: {number: 8080}}
+      EOF
+
+      # Gateway API: attach the route to an existing Gateway (name/namespace from your install)
+      kubectl apply -f - <<'EOF'
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: api-route
+      spec:
+        parentRefs:
+        - name: my-gateway               # replace with your Gateway
+          namespace: default
+        hostnames: ["cka.local"]
+        rules:
+        - backendRefs:
+          - {name: api-svc, port: 8080}
+      EOF
+      # Functional test through the controller's address, e.g.
+      #   curl -H 'Host: cka.local' http://<controller-address>/

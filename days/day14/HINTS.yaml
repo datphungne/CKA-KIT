@@ -1,0 +1,162 @@
+# Progressive help for Day 14 (final mock). Solutions assume namespace cka-d14 is the default.
+exercises:
+  "14.1":
+    docs:
+      - title: Operating etcd clusters — backing up
+        url: https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#backing-up-an-etcd-cluster
+      - title: Debugging Kubernetes nodes with kubectl
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/kubectl-node-debug/
+    hint: >-
+      Snapshot exactly as in 05.4. For the kubelet service, open a node shell
+      (`kubectl debug node/... --profile=sysadmin`, `chroot /host`) and run `systemctl status kubelet`.
+      kubeadm's static Pod path is `/etc/kubernetes/manifests` (kubelet's `staticPodPath`).
+    automated: false
+    solution: |
+      E="kubectl -n kube-system exec etcd-cka-14d-control-plane --"
+      $E etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+        --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key \
+        snapshot save /var/lib/etcd/final.db
+      kubectl debug node/cka-14d-control-plane --image=busybox:1.36 --profile=sysadmin -- sleep 1800
+      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1)
+      kubectl wait --for=condition=Ready "$NODE_POD" --timeout=90s
+      {
+        $E etcdutl snapshot status /var/lib/etcd/final.db -w table
+        kubectl exec "$NODE_POD" -- chroot /host grep staticPodPath /var/lib/kubelet/config.yaml
+        kubectl exec "$NODE_POD" -- chroot /host systemctl status kubelet --no-pager --lines=0
+      } 2>&1 | tee answers/day14-admin.txt
+      kubectl delete "$NODE_POD"
+  "14.2":
+    docs:
+      - title: Debug Pods
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-pods/
+      - title: Debugging Kubernetes nodes with kubectl
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/kubectl-node-debug/
+    hint: >-
+      Fix the image with `set image` and the selector with `patch`. For kubelet logs on worker2, use a
+      node shell and `journalctl -u kubelet`; save a few lines plus your one-line summary.
+    automated: true
+    solution: |
+      kubectl set image deployment/billing nginx=nginx:1.27
+      kubectl patch service orders-svc -p '{"spec":{"selector":{"app":"orders"}}}'
+      kubectl rollout status deployment/billing --timeout=180s
+      kubectl get endpointslice -l kubernetes.io/service-name=orders-svc
+      kubectl debug node/cka-14d-worker2 --image=busybox:1.36 --profile=sysadmin -- sleep 600
+      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-worker2 | head -1)
+      kubectl wait --for=condition=Ready "$NODE_POD" --timeout=90s
+      {
+        echo "Summary: billing had a non-existent image tag (ImagePullBackOff); orders-svc selector did not match app=orders."
+        echo "kubelet on cka-14d-worker2 (last lines):"
+        kubectl exec "$NODE_POD" -- chroot /host journalctl -u kubelet --no-pager -n 15
+      } 2>&1 | tee answers/day14-troubleshooting.txt
+      kubectl delete "$NODE_POD"
+  "14.3":
+    docs:
+      - title: Service
+        url: https://kubernetes.io/docs/concepts/services-networking/service/
+      - title: Network Policies
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/
+    hint: >-
+      `kubectl expose deployment billing --name=billing-svc --port=8080 --target-port=80`. Policy on
+      `app=orders` allowing `role=trusted` on TCP/80; test through `orders-svc` from both clients.
+    automated: true
+    solution: |
+      kubectl expose deployment billing --name=billing-svc --port=8080 --target-port=80
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: orders-allow
+      spec:
+        podSelector:
+          matchLabels: {app: orders}
+        policyTypes: [Ingress]
+        ingress:
+        - from:
+          - podSelector:
+              matchLabels: {role: trusted}
+          ports:
+          - {protocol: TCP, port: 80}
+      EOF
+      sleep 5
+      kubectl exec trusted-client -- wget -T 3 -q -O /dev/null http://orders-svc && echo "trusted: allowed"
+      kubectl exec untrusted-client -- wget -T 3 -q -O /dev/null http://orders-svc || echo "untrusted: blocked"
+      kubectl exec net-client -- wget -T 3 -q -O /dev/null http://billing-svc:8080 && echo "billing-svc: ok"
+  "14.4":
+    docs:
+      - title: Secrets — using Secrets as environment variables
+        url: https://kubernetes.io/docs/concepts/configuration/secret/#using-secrets-as-environment-variables
+      - title: Deployments — rolling update strategy
+        url: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#rolling-update-deployment
+      - title: Configure liveness, readiness and startup probes
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+    hint: >-
+      Secret via `--from-literal=TOKEN=pass`; in the Deployment combine `strategy.rollingUpdate`,
+      `env[].valueFrom.secretKeyRef` and a `readinessProbe.httpGet`.
+    automated: true
+    solution: |
+      kubectl create secret generic final-secret --from-literal=TOKEN=pass
+      kubectl apply -f - <<'EOF'
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: final-web
+      spec:
+        replicas: 3
+        strategy:
+          type: RollingUpdate
+          rollingUpdate: {maxUnavailable: 1}
+        selector:
+          matchLabels: {app: final-web}
+        template:
+          metadata:
+            labels: {app: final-web}
+          spec:
+            containers:
+            - name: nginx
+              image: nginx:1.27
+              readinessProbe:
+                httpGet: {path: /, port: 80}
+              env:
+              - name: TOKEN
+                valueFrom:
+                  secretKeyRef: {name: final-secret, key: TOKEN}
+      EOF
+      kubectl rollout status deployment/final-web --timeout=180s
+  "14.5":
+    docs:
+      - title: Configure a Pod to use a PersistentVolume
+        url: https://kubernetes.io/docs/tutorials/configuration/configure-persistent-volume-storage/
+    hint: >-
+      Same pattern as 10.5: dynamic PVC, busybox Pod mounting `/data`, write the proof with
+      `kubectl exec ... -- sh -c 'echo cka-final > /data/proof.txt'` and read it back.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: final-claim
+      spec:
+        storageClassName: standard
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 1Gi}
+      ---
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: final-writer
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          volumeMounts:
+          - {name: data, mountPath: /data}
+        volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: final-claim}
+      EOF
+      kubectl wait --for=condition=Ready pod/final-writer --timeout=180s
+      kubectl exec final-writer -- sh -c 'echo cka-final > /data/proof.txt'
+      kubectl exec final-writer -- cat /data/proof.txt

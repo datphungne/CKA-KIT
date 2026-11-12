@@ -1,0 +1,127 @@
+# Progressive help for Day 05. Solutions assume namespace cka-d05 is the default.
+# Node access without Docker: a sysadmin debug Pod on the node + chroot /host (like ssh in the exam).
+exercises:
+  "05.1":
+    docs:
+      - title: Debugging Kubernetes nodes with kubectl (kubectl debug node)
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/kubectl-node-debug/
+      - title: Creating a cluster with kubeadm
+        url: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/
+    hint: >-
+      Open a node shell: `kubectl debug node/cka-14d-control-plane -it --profile=sysadmin
+      --image=busybox:1.36`, then `chroot /host`. kubeadm keeps static Pod manifests in
+      `/etc/kubernetes/manifests` and the admin kubeconfig in `/etc/kubernetes/admin.conf`.
+    automated: true
+    solution: |
+      # Non-interactive form: start a debug Pod on the node, then exec into it.
+      kubectl debug node/cka-14d-control-plane --image=busybox:1.36 --profile=sysadmin -- sleep 1800
+      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1)
+      kubectl wait --for=condition=Ready "$NODE_POD" --timeout=90s
+      kubectl exec "$NODE_POD" -- chroot /host ls -l /etc/kubernetes/manifests /etc/kubernetes/admin.conf
+      {
+        echo "## kubeadm version"
+        kubectl exec "$NODE_POD" -- chroot /host kubeadm version -o short
+        echo "## nodes"
+        kubectl get nodes -o wide
+      } | tee answers/day05-cluster.txt
+      # Interactive alternative:
+      #   kubectl debug node/cka-14d-control-plane -it --profile=sysadmin --image=busybox:1.36
+      #   chroot /host; kubeadm version; ls /etc/kubernetes/manifests
+  "05.2":
+    docs:
+      - title: kubeadm token
+        url: https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-token/
+      - title: kubeadm join
+        url: https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-join/
+    hint: >-
+      `kubeadm token create --print-join-command` runs on the control plane. Pipe the output
+      through `sed` to replace the token (`abcdef.0123456789abcdef`) and the CA hash before saving.
+    automated: true
+    solution: |
+      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1)
+      if [ -z "$NODE_POD" ]; then
+        kubectl debug node/cka-14d-control-plane --image=busybox:1.36 --profile=sysadmin -- sleep 1800
+        NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1)
+        kubectl wait --for=condition=Ready "$NODE_POD" --timeout=90s
+      fi
+      kubectl exec "$NODE_POD" -- chroot /host kubeadm token create --print-join-command \
+        | sed -E 's/[a-z0-9]{6}\.[a-z0-9]{16}/<REDACTED-TOKEN>/; s/sha256:[a-f0-9]{64}/sha256:<REDACTED-HASH>/' \
+        | tee answers/day05-join.txt
+      kubectl exec "$NODE_POD" -- chroot /host kubeadm token list
+  "05.3":
+    docs:
+      - title: Static Pods
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/static-pod/
+      - title: kube-apiserver flags
+        url: https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/
+    hint: >-
+      Each file in `/etc/kubernetes/manifests` is a static Pod. The flags are the `- --name=value`
+      lines under `command:`; e.g. `--etcd-servers`, `--secure-port`, `--leader-elect`, `--data-dir`.
+    automated: true
+    solution: |
+      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1)
+      kubectl exec "$NODE_POD" -- chroot /host sh -c '
+        for f in /etc/kubernetes/manifests/*.yaml; do
+          echo "## $(basename "$f" .yaml)"
+          grep -E "^ +- --" "$f" | head -3
+        done' | tee answers/day05-static-pods.txt
+  "05.4":
+    docs:
+      - title: Operating etcd clusters — backing up an etcd cluster
+        url: https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#backing-up-an-etcd-cluster
+    hint: >-
+      Read the cert paths from `etcd.yaml` (`--trusted-ca-file`, `--cert-file`, `--key-file`).
+      `etcdctl snapshot save` needs `--endpoints=https://127.0.0.1:2379` plus those three files;
+      check the result with `etcdutl snapshot status`. Never restore onto the shared lab.
+    automated: false
+    solution: |
+      # The etcd image ships etcdctl/etcdutl but no shell, so call the binaries directly.
+      kubectl -n kube-system exec etcd-cka-14d-control-plane -- etcdctl \
+        --endpoints=https://127.0.0.1:2379 \
+        --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+        --cert=/etc/kubernetes/pki/etcd/server.crt \
+        --key=/etc/kubernetes/pki/etcd/server.key \
+        snapshot save /var/lib/etcd/cka-snapshot.db
+      kubectl -n kube-system exec etcd-cka-14d-control-plane -- \
+        etcdutl snapshot status /var/lib/etcd/cka-snapshot.db -w table
+      # Move it out of the etcd data directory (hostPath) using the node shell.
+      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1)
+      kubectl exec "$NODE_POD" -- chroot /host sh -c \
+        'mkdir -p /var/backups/etcd && mv /var/lib/etcd/cka-snapshot.db /var/backups/etcd/ && ls -l /var/backups/etcd'
+      # Done with the node: remove the debug Pod.
+      kubectl delete "$NODE_POD"
+  "05.5":
+    docs:
+      - title: Creating a cluster with kubeadm
+        url: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/
+      - title: Restoring an etcd cluster
+        url: https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#restoring-an-etcd-cluster
+      - title: Installing kubeadm
+        url: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/
+    hint: >-
+      Order on VMs: container runtime + kubeadm/kubelet/kubectl on both → `kubeadm init` on the
+      control plane → copy admin.conf → install a CNI → run the join command on the worker. For
+      restore: stop the API server/etcd static Pods, `etcdutl snapshot restore` into a new data dir,
+      point the etcd manifest's hostPath at it.
+    automated: false
+    solution: |
+      # --- On the control-plane VM ---
+      sudo kubeadm init --pod-network-cidr=192.168.0.0/16
+      mkdir -p $HOME/.kube && sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config && sudo chown $(id -u):$(id -g) $HOME/.kube/config
+      kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/v3_projectcalico_org.yaml
+      kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/tigera-operator.yaml
+      kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/custom-resources.yaml
+      kubeadm token create --print-join-command        # copy this
+
+      # --- On the worker VM ---
+      sudo kubeadm join <cp-ip>:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>
+
+      # --- Restore drill on a disposable clone of the control plane ---
+      sudo ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
+        --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt \
+        --key=/etc/kubernetes/pki/etcd/server.key snapshot save /var/backups/etcd.db
+      kubectl create namespace after-backup             # change something after the backup
+      sudo etcdutl snapshot restore /var/backups/etcd.db --data-dir /var/lib/etcd-restored
+      sudo sed -i 's#path: /var/lib/etcd$#path: /var/lib/etcd-restored#' /etc/kubernetes/manifests/etcd.yaml
+      # wait for etcd and kube-apiserver to restart, then:
+      kubectl get ns after-backup                       # should be NotFound after the restore

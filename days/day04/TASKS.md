@@ -54,9 +54,9 @@ kubectl -n cka-d04 get pvc mode-claim -o yaml
 
 ## Exercise 04.5 — Reclaim policy (12 min)
 
-**Your mission:** Confirm `cka-d04-local-pv` uses `Retain`. Delete `data-writer` and `data-claim`; examine PV state and retained data on node. Write observations to `answers/day04-reclaim.txt`.
+**Your mission:** Confirm `cka-d04-local-pv` uses `Retain`. Delete `data-writer` and `data-claim`, observe the PV turn `Released`, and write your observations (include the word `Released`) to `answers/day04-reclaim.txt`. Then make the PV `Available` again by clearing its `claimRef`, recreate `data-claim` and `data-writer`, and confirm `/data/proof.txt` survived.
 
-**Pass when:** PV becomes Released (or remains safe during deletion), file still exists on node.
+**Pass when:** PV is `Retain`, the observations file mentions `Released`, and the recreated claim/Pod still read `hello-cka` from the retained volume.
 
 **Check yourself:**
 

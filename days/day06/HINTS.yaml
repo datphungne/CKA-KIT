@@ -1,0 +1,92 @@
+# Progressive help for Day 06. Solutions assume namespace cka-d06 is the default.
+exercises:
+  "06.1":
+    docs:
+      - title: Safely drain a node
+        url: https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/
+      - title: kubectl drain
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/
+    hint: >-
+      Find a worker running a replica with `kubectl get pods -o wide`. `kubectl drain` cordons
+      automatically; DaemonSet Pods block it unless you pass `--ignore-daemonsets`, and bare Pods
+      need `--force`. Uncordon when the Deployment is back to 3/3.
+    automated: true
+    test_wait_seconds: 35
+    solution: |
+      NODE=$(kubectl get pods -l app=maintenance-app -o jsonpath='{.items[0].spec.nodeName}')
+      echo "Draining $NODE"
+      kubectl cordon "$NODE"
+      kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force --timeout=180s
+      kubectl rollout status deployment/maintenance-app --timeout=180s
+      kubectl get pods -l app=maintenance-app -o wide
+      kubectl uncordon "$NODE"
+      kubectl get nodes
+  "06.2":
+    docs:
+      - title: Using RBAC authorization
+        url: https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+      - title: kubectl auth can-i
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_auth/kubectl_auth_can-i/
+    hint: >-
+      All three objects have imperative generators: `kubectl create serviceaccount`,
+      `kubectl create role --verb=... --resource=pods`, `kubectl create rolebinding --role=...
+      --serviceaccount=<ns>:<name>`. Test with `kubectl auth can-i ... --as=system:serviceaccount:...`.
+    automated: true
+    solution: |
+      kubectl create serviceaccount auditor
+      kubectl create role pod-reader --verb=get,list,watch --resource=pods
+      kubectl create rolebinding auditor-binding --role=pod-reader --serviceaccount=cka-d06:auditor
+      kubectl auth can-i list pods --as=system:serviceaccount:cka-d06:auditor     # yes
+      kubectl auth can-i delete pods --as=system:serviceaccount:cka-d06:auditor || true  # "no" (exit code 1)
+  "06.3":
+    docs:
+      - title: Using RBAC authorization — ClusterRole and ClusterRoleBinding
+        url: https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-and-clusterrole
+    hint: >-
+      Nodes are cluster-scoped, so a Role cannot grant them. Use `kubectl create clusterrole` and
+      `kubectl create clusterrolebinding` (no namespace on either; the subject keeps its namespace).
+    automated: true
+    solution: |
+      kubectl create serviceaccount node-auditor
+      kubectl create clusterrole cka-d06-node-reader --verb=get,list,watch --resource=nodes
+      kubectl create clusterrolebinding cka-d06-node-reader --clusterrole=cka-d06-node-reader \
+        --serviceaccount=cka-d06:node-auditor
+      kubectl auth can-i list nodes --as=system:serviceaccount:cka-d06:node-auditor    # yes
+      kubectl auth can-i patch nodes --as=system:serviceaccount:cka-d06:node-auditor || true  # "no" (exit code 1)
+  "06.4":
+    docs:
+      - title: helm install
+        url: https://helm.sh/docs/helm/helm_install/
+      - title: helm upgrade
+        url: https://helm.sh/docs/helm/helm_upgrade/
+    hint: >-
+      A chart directory can be installed directly: `helm install <release> <path> -n <ns>`. Change
+      values on upgrade with `--set replicaCount=3` (add `--reuse-values` to keep earlier overrides).
+    automated: true
+    solution: |
+      helm install cka-d06-web charts/mini-web -n cka-d06
+      helm upgrade cka-d06-web charts/mini-web -n cka-d06 --reuse-values --set replicaCount=3
+      kubectl rollout status deployment/mini-web --timeout=180s
+      helm -n cka-d06 list
+  "06.5":
+    docs:
+      - title: Declarative management with Kustomize
+        url: https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/
+      - title: Custom Resources
+        url: https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/
+    hint: >-
+      The overlay's `images[].newTag` and `replicas[].count` are the two TODOs. Preview with
+      `kubectl kustomize <dir>`, apply with `kubectl apply -k <dir>`. List CRDs with
+      `kubectl get crd` and read one with `kubectl explain`.
+    automated: true
+    solution: |
+      # Work on a copy so the shipped material stays pristine.
+      rm -rf /tmp/kustomize && cp -r materials/kustomize /tmp/kustomize
+      sed -i 's/newTag: "1.26".*/newTag: "1.27"/; s/count: 1 .*/count: 2/' /tmp/kustomize/overlays/exam/kustomization.yaml
+      cat /tmp/kustomize/overlays/exam/kustomization.yaml
+      kubectl kustomize /tmp/kustomize/overlays/exam | grep -E 'image:|replicas:'
+      kubectl apply -k /tmp/kustomize/overlays/exam
+      kubectl rollout status deployment/overlay-web --timeout=180s
+      # Inspect a CRD (Calico ships several)
+      kubectl get crd -o name | grep projectcalico.org
+      kubectl explain ippools.spec --api-version=projectcalico.org/v3

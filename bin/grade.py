@@ -253,7 +253,7 @@ TASKS: dict[int, list[tuple[str, Any]]] = {
     ("Persistence after Pod recreation", lambda: has_mount("data-writer","data-claim","/data") and proof("data-writer","/data/proof.txt","hello-cka")),
     ("Dynamic claim mounted", lambda: volume("dynamic-claim","1Gi") and has_mount("dynamic-reader","dynamic-claim","/data")),
     ("Access modes and Filesystem", lambda: volume("mode-claim","200Mi") and "ReadWriteOnce" in path(obj("pvc","mode-claim"),"spec","accessModes",default=[]) and path(obj("pvc","mode-claim"),"spec","volumeMode") in (None,"Filesystem")),
-    ("ReclaimPolicy (verify after deleting claim)", lambda: path(obj("pv","cka-d04-local-pv",None),"spec","persistentVolumeReclaimPolicy") == "Retain" and file_contains("day04-reclaim.txt")),
+    ("Retain: Released, re-bound, data kept", lambda: path(obj("pv","cka-d04-local-pv",None),"spec","persistentVolumeReclaimPolicy") == "Retain" and file_contains("day04-reclaim.txt", "Released") and proof("data-writer","/data/proof.txt","hello-cka")),
   ],
   5: [
     ("Control-plane discovery notes", lambda: file_contains("day05-cluster.txt","cka-14d")),

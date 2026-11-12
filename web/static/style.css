@@ -11,3 +11,24 @@ button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid #74b4
 .task-details{font-size:12px}.task-name{font-size:13px}.day-name{font-size:12px}#terminal{height:400px;min-height:320px;resize:vertical}.res-table{font-size:11px}.task-list{max-height:750px;overflow:auto;padding-right:4px}
 @media(max-width:700px){.task-list{max-height:none}.resource-filters{flex-wrap:wrap}.terminal-toolbar{padding:0 10px;font-size:9px}.terminal-traffic{display:none}.right-heading{padding:0 14px}.confirm-actions{flex-wrap:wrap}.workspace-notice{font-size:12px}.page-footer{line-height:1.8}}
 .status-warn{color:#ebc36e}
+.task-help{margin-top:12px;border-top:1px dashed #2c3d58;padding-top:11px}
+.help-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.help-btn{height:28px;border-radius:6px;border:1px solid #33496b;background:#14223a;color:#a9c2e6;font-size:11px;font-weight:700;padding:0 11px;transition:background .15s,border-color .15s}
+.help-btn:hover{background:#1c2f4d;border-color:#4a6894}
+.help-btn:focus-visible,.copy-btn:focus-visible,.doc-links a:focus-visible{outline:2px solid #72adfa;outline-offset:2px}
+.help-btn.on{background:#203a60;border-color:#5a8fe0;color:#dcebff}
+.help-btn.solution.on{background:#3a2f1c;border-color:#b8913f;color:#f4dba5}
+.help-tag{margin-left:auto;font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#6ccfae;background:#163a35;border-radius:4px;padding:3px 6px}
+.hint-body,.solution-body{margin-top:10px;font-size:12px;line-height:1.65;color:#b6c4da}
+.hint-body{background:#13233a;border:1px solid #2a4366;border-radius:7px;padding:10px 12px}
+.hint-body p{margin:8px 0 0}
+.hint-body code{font-family:var(--mono);background:#22324a;border-radius:3px;padding:1px 4px;font-size:10px;color:#90bfff}
+.help-caption{display:flex;align-items:center;justify-content:space-between;font-size:9px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:#7f93b3;margin-bottom:6px}
+.doc-links{margin:0;padding-left:16px}
+.doc-links li{margin:3px 0}
+.doc-links a{color:#8cc0ff;text-decoration:none;font-weight:600}
+.doc-links a:hover{text-decoration:underline}
+.doc-host{font-family:var(--mono);font-size:9px;color:#61779a}
+.solution-body pre{margin:0;padding:10px 12px;background:#0b1424;border:1px solid #4a3d22;border-radius:7px;overflow:auto;font-family:var(--mono);font-size:11px;line-height:1.55;color:#e8d6aa;max-height:420px}
+.copy-btn{font-size:10px;font-weight:700;letter-spacing:0;text-transform:none;border:1px solid #4a3d22;background:#2b2416;color:#f0d79c;border-radius:5px;padding:3px 9px}
+.copy-btn:hover{background:#3a301c}

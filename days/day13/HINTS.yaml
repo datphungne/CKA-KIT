@@ -1,0 +1,109 @@
+# Progressive help for Day 13 (speed drills). Solutions assume namespace cka-d13 is the default.
+exercises:
+  "13.1":
+    docs:
+      - title: kubectl quick reference
+        url: https://kubernetes.io/docs/reference/kubectl/quick-reference/
+    hint: >-
+      Four one-liners: two `kubectl run`, two `kubectl create deployment --replicas`. Then wait for
+      everything at once with `kubectl wait`.
+    automated: true
+    solution: |
+      kubectl run alpha --image=nginx:1.27
+      kubectl run beta --image=nginx:1.27
+      kubectl create deployment rapid-a --image=nginx:1.27 --replicas=2
+      kubectl create deployment rapid-b --image=nginx:1.27 --replicas=3
+      kubectl wait --for=condition=Ready pod/alpha pod/beta --timeout=120s
+      kubectl rollout status deployment/rapid-a --timeout=120s
+      kubectl rollout status deployment/rapid-b --timeout=120s
+  "13.2":
+    docs:
+      - title: Network Policies
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/
+      - title: kubectl label
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_label/
+    hint: >-
+      Patch the Service selector, label the existing `tester` Pod `role=tester`, then a policy on
+      `app=gateway` allowing that label on TCP/80.
+    automated: true
+    solution: |
+      kubectl patch service gateway-svc -p '{"spec":{"selector":{"app":"gateway"}}}'
+      kubectl label pod tester role=tester
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: gateway-allow
+      spec:
+        podSelector:
+          matchLabels: {app: gateway}
+        policyTypes: [Ingress]
+        ingress:
+        - from:
+          - podSelector:
+              matchLabels: {role: tester}
+          ports:
+          - {protocol: TCP, port: 80}
+      EOF
+      sleep 5
+      kubectl exec tester -- wget -T 3 -q -O /dev/null http://gateway-svc && echo "tester: allowed"
+  "13.3":
+    docs:
+      - title: Configure a Pod to use a PersistentVolume
+        url: https://kubernetes.io/docs/tutorials/configuration/configure-persistent-volume-storage/
+    hint: >-
+      PVC on the `standard` class + Pod with the claim mounted at `/data`.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: speed-data
+      spec:
+        storageClassName: standard
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 500Mi}
+      ---
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: speed-writer
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          volumeMounts:
+          - {name: data, mountPath: /data}
+        volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: speed-data}
+      EOF
+      kubectl wait --for=condition=Ready pod/speed-writer --timeout=180s
+  "13.4":
+    docs:
+      - title: Using RBAC authorization
+        url: https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+    hint: >-
+      Read-only = `get,list,watch`. Verify both the allowed and the denied verb with `auth can-i`.
+    automated: true
+    solution: |
+      kubectl create serviceaccount speed-auditor
+      kubectl create role speed-reader --verb=get,list,watch --resource=configmaps
+      kubectl create rolebinding speed-binding --role=speed-reader --serviceaccount=cka-d13:speed-auditor
+      kubectl auth can-i list configmaps --as=system:serviceaccount:cka-d13:speed-auditor              # yes
+      kubectl auth can-i delete configmaps --as=system:serviceaccount:cka-d13:speed-auditor || true    # no
+  "13.5":
+    docs:
+      - title: Deployments — checking rollout status
+        url: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#deployment-status
+    hint: >-
+      `kubectl rollout status` hangs on a bad image; the Pod Events show the missing tag.
+      `set image` to a real tag.
+    automated: true
+    solution: |
+      kubectl get deployment broken-rollout -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+      kubectl set image deployment/broken-rollout nginx=nginx:1.27
+      kubectl rollout status deployment/broken-rollout --timeout=180s

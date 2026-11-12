@@ -1,0 +1,167 @@
+# Progressive help for Day 10 (mock exam I). Solutions assume namespace cka-d10 is the default.
+exercises:
+  "10.1":
+    docs:
+      - title: Operating etcd clusters — backing up
+        url: https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#backing-up-an-etcd-cluster
+      - title: Debugging Kubernetes nodes with kubectl
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/kubectl-node-debug/
+    hint: >-
+      Static Pod manifests live in `/etc/kubernetes/manifests`; `kubectl get nodes -o wide` shows
+      kubelet versions. Reuse the Day 05.4 snapshot procedure (etcdctl inside the etcd Pod, then
+      `etcdutl snapshot status`) and write what you found to the notes file.
+    automated: false
+    solution: |
+      kubectl get nodes -o custom-columns=NAME:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion
+      kubectl -n kube-system get pod etcd-cka-14d-control-plane -o jsonpath='{.metadata.annotations.kubernetes\.io/config\.source}{"\n"}'
+      kubectl -n kube-system exec etcd-cka-14d-control-plane -- etcdctl \
+        --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+        --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key \
+        snapshot save /var/lib/etcd/mock10.db
+      kubectl -n kube-system exec etcd-cka-14d-control-plane -- etcdutl snapshot status /var/lib/etcd/mock10.db -w table
+      {
+        echo "etcd static Pod manifest: /etc/kubernetes/manifests/etcd.yaml (config.source=file)"
+        kubectl get nodes -o custom-columns=NODE:.metadata.name,KUBELET:.status.nodeInfo.kubeletVersion --no-headers
+        echo "Snapshot: /var/lib/etcd/mock10.db on cka-14d-control-plane (validated with etcdutl snapshot status)"
+      } | tee answers/day10-admin.txt
+  "10.2":
+    docs:
+      - title: Debug Services
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-service/
+      - title: Network Policies
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/
+    hint: >-
+      Three independent fixes: patch the Service selector, `set image` then `expose` the repaired
+      Deployment, and a NetworkPolicy on `app=backend` allowing only `role=trusted` on TCP/80.
+    automated: true
+    solution: |
+      kubectl patch service backend-svc -p '{"spec":{"selector":{"app":"backend"}}}'
+      kubectl set image deployment/bad-image nginx=nginx:1.27
+      kubectl rollout status deployment/bad-image --timeout=180s
+      kubectl expose deployment bad-image --name=bad-image-svc --port=80 --target-port=80
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: trusted-only
+      spec:
+        podSelector:
+          matchLabels: {app: backend}
+        policyTypes: [Ingress]
+        ingress:
+        - from:
+          - podSelector:
+              matchLabels: {role: trusted}
+          ports:
+          - {protocol: TCP, port: 80}
+      EOF
+      sleep 5
+      kubectl exec trusted-client -- wget -T 3 -q -O /dev/null http://backend-svc && echo "trusted: allowed"
+      kubectl exec untrusted-client -- wget -T 3 -q -O /dev/null http://backend-svc || echo "untrusted: blocked"
+  "10.3":
+    docs:
+      - title: Configure a Pod to use a ConfigMap
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
+      - title: Configure liveness, readiness and startup probes
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+    hint: >-
+      Create the ConfigMap first (`--from-literal=MODE=test`), then a Deployment whose container has
+      `env[].valueFrom.configMapKeyRef` and a `readinessProbe.httpGet` on `/` port 80.
+    automated: true
+    solution: |
+      kubectl create configmap mock-config --from-literal=MODE=test
+      kubectl apply -f - <<'EOF'
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: mock-web
+      spec:
+        replicas: 3
+        selector:
+          matchLabels: {app: mock-web}
+        template:
+          metadata:
+            labels: {app: mock-web}
+          spec:
+            containers:
+            - name: nginx
+              image: nginx:1.27
+              readinessProbe:
+                httpGet: {path: /, port: 80}
+              env:
+              - name: MODE
+                valueFrom:
+                  configMapKeyRef: {name: mock-config, key: MODE}
+      EOF
+      kubectl rollout status deployment/mock-web --timeout=180s
+  "10.4":
+    docs:
+      - title: Using RBAC authorization
+        url: https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+      - title: Safely drain a node
+        url: https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/
+    hint: >-
+      RBAC is three imperative commands. For maintenance: `drain --ignore-daemonsets` (it cordons),
+      then `uncordon`, and log what you did. Trap: `--force` deletes Pods without a controller for
+      good — here that is `trusted-client`/`untrusted-client`, which 10.2 needs. List the node's Pods
+      first and recreate any bare Pod you had to remove.
+    automated: true
+    solution: |
+      kubectl create serviceaccount mock-viewer
+      kubectl create role mock-reader --verb=get,list,watch --resource=pods
+      kubectl create rolebinding mock-reader-binding --role=mock-reader --serviceaccount=cka-d10:mock-viewer
+      kubectl auth can-i list pods --as=system:serviceaccount:cka-d10:mock-viewer                # yes
+      kubectl auth can-i delete pods --as=system:serviceaccount:cka-d10:mock-viewer || true      # no
+      NODE=$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+      # Bare Pods on this node would be deleted (not rescheduled) by --force. Look first:
+      kubectl get pods -o wide --field-selector spec.nodeName="$NODE"
+      {
+        echo "Maintenance on $NODE at $(date -u +%FT%TZ)"
+        kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force --timeout=180s
+        kubectl uncordon "$NODE"
+        kubectl get nodes
+      } 2>&1 | tee answers/day10-maintenance.txt
+      # Recreate the policy test clients if the drain removed them (10.2 depends on them).
+      for pair in trusted-client:trusted untrusted-client:untrusted; do
+        name=${pair%%:*}; role=${pair##*:}
+        kubectl get pod "$name" >/dev/null 2>&1 ||           kubectl run "$name" --image=busybox:1.36 --labels="role=$role" --command -- sh -c 'sleep 86400'
+      done
+      kubectl wait --for=condition=Ready pod/trusted-client pod/untrusted-client --timeout=120s
+  "10.5":
+    docs:
+      - title: Configure a Pod to use a PersistentVolume
+        url: https://kubernetes.io/docs/tutorials/configuration/configure-persistent-volume-storage/
+    hint: >-
+      PVC with the `standard` class + a busybox Pod mounting it at `/data`; write the proof with
+      `kubectl exec ... -- sh -c 'echo mock-10 > /data/proof.txt'`.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: mock-data
+      spec:
+        storageClassName: standard
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 1Gi}
+      ---
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: mock-writer
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          volumeMounts:
+          - {name: data, mountPath: /data}
+        volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: mock-data}
+      EOF
+      kubectl wait --for=condition=Ready pod/mock-writer --timeout=180s
+      kubectl exec mock-writer -- sh -c 'echo mock-10 > /data/proof.txt'
+      kubectl exec mock-writer -- cat /data/proof.txt

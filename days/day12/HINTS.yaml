@@ -1,0 +1,161 @@
+# Progressive help for Day 12 (mock exam II). Solutions assume namespace cka-d12 is the default.
+exercises:
+  "12.1":
+    docs:
+      - title: Operating etcd clusters — backing up
+        url: https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#backing-up-an-etcd-cluster
+      - title: Safely drain a node
+        url: https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/
+    hint: >-
+      kubeadm runs on the control plane (node shell via `kubectl debug node`). Snapshot as in 05.4.
+      When draining, remember `--force` deletes bare Pods for good — `net-client` and
+      `allowed-client` are needed by 12.3.
+    automated: false
+    solution: |
+      kubectl debug node/cka-14d-control-plane --image=busybox:1.36 --profile=sysadmin -- sleep 1800
+      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1)
+      kubectl wait --for=condition=Ready "$NODE_POD" --timeout=90s
+      E="kubectl -n kube-system exec etcd-cka-14d-control-plane --"
+      $E etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+        --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key \
+        snapshot save /var/lib/etcd/mock12.db
+      WORKER=$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+      kubectl get pods -o wide --field-selector spec.nodeName="$WORKER"     # bare Pods here would be lost
+      {
+        echo "kubeadm: $(kubectl exec "$NODE_POD" -- chroot /host kubeadm version -o short)"
+        $E etcdutl snapshot status /var/lib/etcd/mock12.db -w table
+        kubectl drain "$WORKER" --ignore-daemonsets --delete-emptydir-data --timeout=180s \
+          || kubectl drain "$WORKER" --ignore-daemonsets --delete-emptydir-data --force --timeout=180s
+        kubectl uncordon "$WORKER"
+        kubectl get nodes
+      } 2>&1 | tee answers/day12-admin.txt
+      kubectl delete "$NODE_POD"
+      # If the drain removed net-client / allowed-client, recreate them (see 10.4).
+  "12.2":
+    docs:
+      - title: Debug Pods
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-pods/
+      - title: Debug Services
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-service/
+      - title: Troubleshooting clusters
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/
+    hint: >-
+      Image: Events show the bad tag → `set image`. Service: compare selector with Pod labels →
+      `patch`. Node failure: run the kubelet fault from your machine (Day 08.4), observe NotReady,
+      restore, and finish with every node Ready.
+    automated: true
+    solution: |
+      kubectl set image deployment/faulty-image nginx=nginx:1.27
+      kubectl rollout status deployment/faulty-image --timeout=180s
+      kubectl patch service payments-svc -p '{"spec":{"selector":{"app":"payments"}}}'
+      kubectl get endpointslice -l kubernetes.io/service-name=payments-svc
+      # Node failure drill — on your machine, in the CKA-KIT folder:
+      #   docker compose exec console bash admin/host-fault.sh kubelet stop --confirm
+      #   kubectl get nodes -w            # cka-14d-worker2 goes NotReady
+      #   docker exec cka-14d-worker2 systemctl start kubelet
+      kubectl wait --for=condition=Ready nodes --all --timeout=180s
+  "12.3":
+    docs:
+      - title: Service type NodePort
+        url: https://kubernetes.io/docs/concepts/services-networking/service/#type-nodeport
+      - title: Network Policies
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/
+    hint: >-
+      Expose `payments` as NodePort and patch `nodePort: 30080` (Day 03.2). Policy on
+      `app=payments` allowing `role=allowed` on TCP/80; `net-client` must then time out.
+    automated: true
+    solution: |
+      kubectl expose deployment payments --name=payments-nodeport --type=NodePort --port=80 --target-port=80
+      kubectl patch service payments-nodeport -p '{"spec":{"ports":[{"port":80,"nodePort":30080}]}}'
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: payments-allow
+      spec:
+        podSelector:
+          matchLabels: {app: payments}
+        policyTypes: [Ingress]
+        ingress:
+        - from:
+          - podSelector:
+              matchLabels: {role: allowed}
+          ports:
+          - {protocol: TCP, port: 80}
+      EOF
+      sleep 5
+      kubectl exec allowed-client -- wget -T 3 -q -O /dev/null http://payments-svc && echo "allowed-client: ok"
+      kubectl exec net-client -- wget -T 3 -q -O /dev/null http://payments-svc || echo "net-client: blocked"
+      # From your machine: curl -I http://127.0.0.1:30080  (NetworkPolicy also applies to NodePort traffic)
+  "12.4":
+    docs:
+      - title: DaemonSet
+        url: https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/
+      - title: CronJob
+        url: https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/
+      - title: ConfigMaps
+        url: https://kubernetes.io/docs/concepts/configuration/configmap/
+    hint: >-
+      There is no `kubectl create daemonset`: generate a Deployment with `--dry-run=client -o yaml`,
+      change `kind` to DaemonSet and delete `replicas`/`strategy`. CronJob and ConfigMap have
+      imperative generators.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        name: log-agent
+      spec:
+        selector:
+          matchLabels: {app: log-agent}
+        template:
+          metadata:
+            labels: {app: log-agent}
+          spec:
+            containers:
+            - name: agent
+              image: busybox:1.36
+              command: ["sh", "-c", "sleep 86400"]
+      EOF
+      kubectl create cronjob daily-job --image=busybox:1.36 --schedule='*/5 * * * *' -- echo "daily job ran"
+      kubectl create configmap runtime-settings --from-literal=MODE=test
+      kubectl rollout status daemonset/log-agent --timeout=180s
+      kubectl get ds,cronjob,configmap
+  "12.5":
+    docs:
+      - title: Configure a Pod to use a PersistentVolume
+        url: https://kubernetes.io/docs/tutorials/configuration/configure-persistent-volume-storage/
+    hint: >-
+      Default `standard` class + a Pod mounting the claim at `/backup`; the claim binds when the Pod
+      is scheduled.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: backup-claim
+      spec:
+        storageClassName: standard
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 1Gi}
+      ---
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: backup-pod
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          volumeMounts:
+          - {name: backup, mountPath: /backup}
+        volumes:
+        - name: backup
+          persistentVolumeClaim: {claimName: backup-claim}
+      EOF
+      kubectl wait --for=condition=Ready pod/backup-pod --timeout=180s
+      kubectl get pvc backup-claim
