@@ -91,3 +91,12 @@ def test_no_encoding_damage(path):
     damaged = ['exercises?', 'Running?', 'Preparing?', 'retrying?', 'workspace?', 'lab shell?',
                "'? Completed", ' ? Start the lab', ' ? real kubectl', ' ? 2 workers', 'kind-cka-14d ? ']
     assert [d for d in damaged if d in text] == []
+
+
+def test_scripts_are_executable_in_git():
+    """Windows checkouts drop the +x bit; the git index is what Linux/macOS users get."""
+    out = subprocess.run(['git', 'ls-files', '-s', '--', '*.sh'], cwd=ROOT, capture_output=True, text=True)
+    if out.returncode != 0 or not out.stdout:
+        pytest.skip('not a git checkout')
+    modes = {line.split()[3]: line.split()[0] for line in out.stdout.splitlines()}
+    assert [f for f, m in modes.items() if m != '100755'] == []
