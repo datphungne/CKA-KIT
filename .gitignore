@@ -8,3 +8,8 @@ answers/*
 .DS_Store
 __pycache__/
 *.pyc
+.venv/
+web/__pycache__/
+web/server/__pycache__/
+web/.runtime/
+*.pyc
