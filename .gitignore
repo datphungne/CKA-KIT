@@ -1,0 +1,10 @@
+# Local student answers; avoid committing admin data or snapshots.
+answers/*
+!answers/.gitkeep
+*.db
+*.snap
+*.kubeconfig
+.env
+.DS_Store
+__pycache__/
+*.pyc
