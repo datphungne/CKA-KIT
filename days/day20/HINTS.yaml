@@ -1,0 +1,150 @@
+# Progressive help for Day 20. Solutions assume namespace cka-d20 is the default.
+exercises:
+  "20.1":
+    docs:
+      - title: Extend the Kubernetes API with CustomResourceDefinitions
+        url: https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/
+      - title: Custom Resources
+        url: https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/
+    hint: >-
+      The CRD name must be `<plural>.<group>`. Each entry in `spec.versions` needs `served`, `storage`
+      and a `schema.openAPIV3Schema`; put `required: [schedule]` and the `minimum` on the `spec`
+      object's properties. Wait for the `Established` condition before creating objects.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: apiextensions.k8s.io/v1
+      kind: CustomResourceDefinition
+      metadata:
+        name: backups.cka.io
+      spec:
+        group: cka.io
+        scope: Namespaced
+        names:
+          kind: Backup
+          plural: backups
+          singular: backup
+          shortNames: [bk]
+        versions:
+        - name: v1
+          served: true
+          storage: true
+          schema:
+            openAPIV3Schema:
+              type: object
+              properties:
+                spec:
+                  type: object
+                  required: [schedule]
+                  properties:
+                    schedule: {type: string}
+                    retention: {type: integer, minimum: 1}
+      EOF
+      kubectl wait --for=condition=Established crd/backups.cka.io --timeout=60s
+      # The schema reaches the OpenAPI document a few seconds after Established.
+      for i in $(seq 1 30); do kubectl explain backup.spec >/dev/null 2>&1 && break; sleep 2; done
+      kubectl explain backup.spec
+  "20.2":
+    docs:
+      - title: CustomResourceDefinitions — validation
+        url: https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation
+    hint: >-
+      Create the object with `apiVersion: cka.io/v1`, `kind: Backup`. The API server validates it
+      against the schema, so `retention: 0` is rejected before it is stored.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: cka.io/v1
+      kind: Backup
+      metadata:
+        name: nightly
+      spec:
+        schedule: "0 2 * * *"
+        retention: 7
+      EOF
+      kubectl apply -f - 2>&1 <<'EOF' | tee answers/day20-invalid.txt || true
+      apiVersion: cka.io/v1
+      kind: Backup
+      metadata:
+        name: broken
+      spec:
+        schedule: "0 3 * * *"
+        retention: 0
+      EOF
+      kubectl get bk
+  "20.3":
+    docs:
+      - title: helm upgrade
+        url: https://helm.sh/docs/helm/helm_upgrade/
+      - title: helm rollback
+        url: https://helm.sh/docs/helm/helm_rollback/
+      - title: helm history
+        url: https://helm.sh/docs/helm/helm_history/
+    hint: >-
+      Each install/upgrade/rollback is a numbered revision. `helm history` shows them; `helm rollback
+      <release> <revision>` re-applies an old one as a **new** revision. Add `--wait` so Helm waits for
+      the rollout.
+    automated: true
+    solution: |
+      helm install rollback-web charts/mini-web -n cka-d20 --wait --timeout 3m
+      helm upgrade rollback-web charts/mini-web -n cka-d20 --reuse-values --set image.tag=does-not-exist
+      kubectl rollout status deployment/mini-web --timeout=30s || echo "rollout stuck: bad image (expected)"
+      helm -n cka-d20 history rollback-web
+      helm rollback rollback-web 1 -n cka-d20 --wait --timeout 3m
+      helm -n cka-d20 history rollback-web
+      kubectl get deployment mini-web -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+  "20.4":
+    docs:
+      - title: Declarative management with Kustomize
+        url: https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/
+    hint: >-
+      An overlay's `kustomization.yaml` lists `resources: [../../base]` and transformers:
+      `namespace`, `namePrefix`, `labels` and a `configMapGenerator` (generated names get a content
+      hash). Render with `kubectl kustomize` before `kubectl apply -k`.
+    automated: true
+    solution: |
+      K=answers/day20-kustomize
+      mkdir -p $K/base $K/overlays/prod
+      cp materials/kustomize/base/* $K/base/
+      cat > $K/overlays/prod/kustomization.yaml <<'EOF'
+      apiVersion: kustomize.config.k8s.io/v1beta1
+      kind: Kustomization
+      namespace: cka-d20
+      namePrefix: prod-
+      labels:
+      - pairs:
+          env: prod
+      resources:
+      - ../../base
+      configMapGenerator:
+      - name: web-config
+        literals:
+        - MODE=prod
+      EOF
+      kubectl kustomize $K/overlays/prod
+      kubectl apply -k $K/overlays/prod
+      kubectl rollout status deployment/prod-overlay-web --timeout=180s
+      kubectl get deployment,configmap -l env=prod
+  "20.5":
+    docs:
+      - title: Container Runtimes
+        url: https://kubernetes.io/docs/setup/production-environment/container-runtimes/
+      - title: Network Plugins
+        url: https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/
+      - title: Storage Classes
+        url: https://kubernetes.io/docs/concepts/storage/storage-classes/
+    hint: >-
+      The runtime is in each node's status (`kubectl get nodes -o wide`, CONTAINER-RUNTIME column).
+      The CNI shows up as its DaemonSet/namespace and as config in `/etc/cni/net.d` on a node. The
+      StorageClass `PROVISIONER` column names the storage backend.
+    automated: true
+    solution: |
+      RUNTIME=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.containerRuntimeVersion}')
+      kubectl get daemonsets -A | grep -i -E 'calico|cilium|flannel|weave' || true
+      PROVISIONER=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].provisioner}')
+      kubectl get csidrivers || true
+      {
+        echo "Container runtime (CRI): $RUNTIME"
+        echo "CNI plugin: calico (calico-node DaemonSet in calico-system)"
+        echo "Default StorageClass provisioner: $PROVISIONER"
+      } | tee answers/day20-interfaces.txt

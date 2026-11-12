@@ -7,6 +7,7 @@ import tempfile
 import yaml
 
 CONTEXT = 'kind-cka-14d'
+MAX_DAY = 20  # 14-day bootcamp + topic labs 15..20
 CLUSTER = 'cka-14d'
 
 def run(args):
@@ -37,8 +38,8 @@ def trusted_config():
 def snapshot(day=None):
     config = trusted_config()
     if day is not None:
-        if not 1 <= int(day) <= 14:
-            raise ValueError('Day must be 1..14')
+        if not 1 <= int(day) <= MAX_DAY:
+            raise ValueError(f'Day must be 1..{MAX_DAY}')
         config['contexts'][0]['context']['namespace'] = f'cka-d{int(day):02d}'
     directory = '/lab' if os.environ.get('CKA_CONTAINER') == '1' else None
     fd, name = tempfile.mkstemp(prefix='cka-session-', dir=directory)

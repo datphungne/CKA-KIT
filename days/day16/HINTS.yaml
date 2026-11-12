@@ -1,0 +1,133 @@
+# Progressive help for Day 16. Solutions assume namespace cka-d16 is the default.
+exercises:
+  "16.1":
+    docs:
+      - title: Resource Quotas
+        url: https://kubernetes.io/docs/concepts/policy/resource-quotas/
+      - title: Limit Ranges
+        url: https://kubernetes.io/docs/concepts/policy/limit-range/
+      - title: Configure default memory requests and limits for a namespace
+        url: https://kubernetes.io/docs/tasks/administer-cluster/manage-resources/memory-default-namespace/
+    hint: >-
+      `kubectl create quota ns-quota --hard=...` takes a comma list. LimitRange has no generator:
+      write it with `type: Container`, `default` (= limits) and `defaultRequest`. Order matters —
+      once a quota tracks requests/limits, Pods without them are rejected unless a LimitRange fills
+      them in.
+    automated: true
+    solution: |
+      kubectl create quota ns-quota --hard=pods=20,requests.cpu=2,requests.memory=2Gi,limits.cpu=4,limits.memory=4Gi
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: LimitRange
+      metadata:
+        name: ns-limits
+      spec:
+        limits:
+        - type: Container
+          defaultRequest: {cpu: 100m, memory: 64Mi}
+          default: {cpu: 200m, memory: 128Mi}
+      EOF
+      kubectl run defaulted --image=nginx:1.27
+      kubectl wait --for=condition=Ready pod/defaulted --timeout=120s
+      kubectl get pod defaulted -o jsonpath='{.spec.containers[0].resources}{"\n"}'
+      kubectl describe quota ns-quota
+  "16.2":
+    docs:
+      - title: Pod Priority and Preemption
+        url: https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/
+      - title: kubectl create priorityclass
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_create/kubectl_create_priorityclass/
+    hint: >-
+      PriorityClass is cluster-scoped: `kubectl create priorityclass critical-batch --value=...`.
+      Reference it from the Pod with `spec.priorityClassName`; the admission controller fills in
+      `spec.priority`.
+    automated: true
+    solution: |
+      kubectl create priorityclass critical-batch --value=1000000 \
+        --preemption-policy=PreemptLowerPriority --description="CKA lab: urgent batch work"
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: urgent
+      spec:
+        priorityClassName: critical-batch
+        containers:
+        - name: nginx
+          image: nginx:1.27
+      EOF
+      kubectl wait --for=condition=Ready pod/urgent --timeout=120s
+      kubectl get pod urgent -o jsonpath='{.spec.priorityClassName} {.spec.priority}{"\n"}'
+  "16.3":
+    docs:
+      - title: Specifying a Disruption Budget for your application
+        url: https://kubernetes.io/docs/tasks/run-application/configure-pdb/
+      - title: Disruptions
+        url: https://kubernetes.io/docs/concepts/workloads/pods/disruptions/
+    hint: >-
+      `kubectl create pdb web-pdb --selector=app=web --min-available=2`. With 3 healthy Pods the
+      status shows `ALLOWED DISRUPTIONS 1`; a drain will then evict one Pod at a time.
+    automated: true
+    solution: |
+      kubectl create poddisruptionbudget web-pdb --selector=app=web --min-available=2
+      sleep 3
+      kubectl get pdb web-pdb
+  "16.4":
+    docs:
+      - title: Inter-pod affinity and anti-affinity
+        url: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#inter-pod-affinity-and-anti-affinity
+      - title: Pod Topology Spread Constraints
+        url: https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+    hint: >-
+      Put `podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution` in the Pod template with
+      a `labelSelector` matching the Pods' own label and `topologyKey: kubernetes.io/hostname`.
+      With two workers a third replica would stay Pending.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: spread-web
+      spec:
+        replicas: 2
+        selector:
+          matchLabels: {app: spread-web}
+        template:
+          metadata:
+            labels: {app: spread-web}
+          spec:
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels: {app: spread-web}
+                  topologyKey: kubernetes.io/hostname
+            containers:
+            - name: nginx
+              image: nginx:1.27
+      EOF
+      kubectl rollout status deployment/spread-web --timeout=180s
+      kubectl get pods -l app=spread-web -o wide
+  "16.5":
+    docs:
+      - title: HorizontalPodAutoscaler walkthrough
+        url: https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale-walkthrough/
+      - title: kubectl autoscale
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_autoscale/
+      - title: kubectl top
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_top/
+    hint: >-
+      `kubectl autoscale deployment hpa-app --min=1 --max=5 --cpu=50%`. Utilisation is measured
+      against the container's CPU **request**, so the Deployment must have one. Metrics need about a
+      minute before `TARGETS` stops showing `<unknown>`.
+    automated: true
+    solution: |
+      kubectl autoscale deployment hpa-app --min=1 --max=5 --cpu=50%
+      # Wait until the HPA reads real metrics from metrics-server.
+      for i in $(seq 1 40); do
+        cur=$(kubectl get hpa hpa-app -o jsonpath='{.status.currentMetrics[0].resource.current.averageUtilization}')
+        [ -n "$cur" ] && break; sleep 6
+      done
+      kubectl get hpa hpa-app
+      kubectl top pods || true

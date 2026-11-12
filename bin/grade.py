@@ -16,8 +16,10 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXPECTED_CONTEXT = "kind-cka-14d"
-if len(sys.argv) != 2 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= 14:
-    sys.exit("Usage: python3 bin/grade.py <1..14>")
+sys.path.insert(0, str(ROOT / 'lib'))
+from safety import MAX_DAY, snapshot
+if len(sys.argv) != 2 or not sys.argv[1].isdigit() or not 1 <= int(sys.argv[1]) <= MAX_DAY:
+    sys.exit(f"Usage: python3 bin/grade.py <1..{MAX_DAY}>")
 DAY = int(sys.argv[1]); NS = f"cka-d{DAY:02d}"
 
 
@@ -29,8 +31,6 @@ def cmd(*args: str, timeout: int = 12) -> tuple[bool, str]:
     return run.returncode == 0, run.stdout.strip()
 
 
-sys.path.insert(0, str(ROOT / 'lib'))
-from safety import snapshot
 try:
     config = snapshot(DAY)
 except Exception as exc:
@@ -221,6 +221,155 @@ def rescheduled(deploy: str, label: str, min_age_gap: int = 30) -> bool:
                for p in json.loads(raw).get("items", []))
 
 
+LAB_NODES = {"cka-14d-control-plane", "cka-14d-worker", "cka-14d-worker2"}
+
+
+def node_sh(node: str, script: str, timeout: int = 25) -> tuple[bool, str]:
+    """Read-only inspection of a kind node (the grader runs in the console, which owns Docker)."""
+    if node not in LAB_NODES:
+        return False, ""
+    return cmd("docker", "exec", node, "sh", "-c", script, timeout=timeout)
+
+
+def can_user(user: str, verb: str, resource: str) -> bool:
+    good, out = cmd("kubectl", "auth", "can-i", verb, resource, "--as", user, "-n", NS)
+    return good and out == "yes"
+
+
+def epoch(ts: str | None) -> float:
+    from datetime import datetime, timezone
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp() if ts else 0.0
+
+
+def etcd_data_dir() -> str:
+    good, out = node_sh("cka-14d-control-plane", "grep -E '^ +path: /var/lib/etcd' /etc/kubernetes/manifests/etcd.yaml")
+    return out.split("path:")[-1].strip() if good and "path:" in out else ""
+
+
+def etcd_backup_fresh() -> bool:
+    drill = obj("cm", "etcd-drill")
+    good, out = node_sh("cka-14d-control-plane", "etcdutl snapshot status /opt/cka-etcd/backup.db -w json && stat -c %Y /opt/cka-etcd/backup.db")
+    lines = out.splitlines()
+    if not drill or not good or len(lines) < 2:
+        return False
+    try:
+        status = json.loads(lines[-2])
+    except json.JSONDecodeError:
+        return False
+    return status.get("revision", 0) > 0 and float(lines[-1]) >= epoch(path(drill, "metadata", "creationTimestamp"))
+
+
+def apiserver_restarted_after_etcd() -> bool:
+    """A kube-apiserver that survived the restore serves a stale watch cache."""
+    good, out = node_sh("cka-14d-control-plane", "crictl ps -o json")
+    if not good:
+        return False
+    created = {c["metadata"]["name"]: int(c.get("createdAt", 0)) for c in json.loads(out).get("containers", [])}
+    return created.get("kube-apiserver", 0) > created.get("etcd", 0) > 0
+
+
+def etcd_restored() -> bool:
+    want = path(obj("cm", "etcd-drill"), "data", "restoreDir")
+    return (bool(want) and etcd_data_dir() == want and apiserver_restarted_after_etcd()
+            and bool(obj("cm", "keep-me")) and not obj("cm", "after-backup") and all_nodes_ready())
+
+
+def csr_issued(name: str) -> bool:
+    c = obj("csr", name, None)
+    approved = any(x.get("type") == "Approved" and x.get("status", "True") == "True" for x in path(c, "status", "conditions", default=[]))
+    return approved and bool(path(c, "status", "certificate")) and path(c, "spec", "signerName") == "kubernetes.io/kube-apiserver-client"
+
+
+def quota_ok() -> bool:
+    hard = path(obj("quota", "ns-quota"), "spec", "hard", default={})
+    want = {"pods": "20", "requests.cpu": "2", "requests.memory": "2Gi", "limits.cpu": "4", "limits.memory": "4Gi"}
+    return all(str(hard.get(k)) == v for k, v in want.items())
+
+
+def limitrange_ok() -> bool:
+    items = path(obj("limitrange", "ns-limits"), "spec", "limits", default=[])
+    c = next((i for i in items if i.get("type") == "Container"), {})
+    return (c.get("default", {}).get("cpu") == "200m" and c.get("default", {}).get("memory") == "128Mi"
+            and c.get("defaultRequest", {}).get("cpu") == "100m" and c.get("defaultRequest", {}).get("memory") == "64Mi")
+
+
+def pods_on_distinct_nodes(label: str, count: int) -> bool:
+    good, raw = cmd("kubectl", "-n", NS, "get", "pods", "-l", label, "-o", "json")
+    if not good:
+        return False
+    nodes = [p["spec"].get("nodeName") for p in json.loads(raw).get("items", []) if p.get("status", {}).get("phase") == "Running"]
+    return len(nodes) == count and len(set(nodes)) == count
+
+
+def hpa_ok() -> bool:
+    h = obj("hpa", "hpa-app")
+    metrics = path(h, "spec", "metrics", default=[])
+    cpu = any(path(m, "resource", "name") == "cpu" and path(m, "resource", "target", "averageUtilization") == 50 for m in metrics)
+    current = any(path(m, "resource", "current", "averageUtilization") is not None for m in path(h, "status", "currentMetrics", default=[]) or [])
+    return (path(h, "spec", "scaleTargetRef", "name") == "hpa-app" and path(h, "spec", "minReplicas") == 1
+            and path(h, "spec", "maxReplicas") == 5 and cpu and current)
+
+
+def secure_pod_ok() -> bool:
+    p = obj("pod", "secure-pod")
+    pod_sc = path(p, "spec", "securityContext", default={})
+    c_sc = path(p, "spec", "containers", 0, "securityContext", default={})
+    good, uid = cmd("kubectl", "-n", NS, "exec", "secure-pod", "--", "id", "-u")
+    return (ready("pod", "secure-pod") and good and uid == "1000"
+            and pod_sc.get("runAsUser") == 1000 and pod_sc.get("runAsGroup") == 3000 and pod_sc.get("fsGroup") == 2000
+            and (pod_sc.get("runAsNonRoot") or c_sc.get("runAsNonRoot")) is True
+            and c_sc.get("allowPrivilegeEscalation") is False and c_sc.get("readOnlyRootFilesystem") is True
+            and "ALL" in path(c_sc, "capabilities", "drop", default=[]))
+
+
+def native_sidecar(pod: str, name: str) -> bool:
+    inits = path(obj("pod", pod), "spec", "initContainers", default=[])
+    return any(c.get("name") == name and c.get("restartPolicy") == "Always" for c in inits)
+
+
+def http_from(namespace: str, pod: str, url: str) -> bool:
+    good, _ = cmd("kubectl", "-n", namespace, "exec", pod, "--", "wget", "-T", "3", "-q", "-O", "/dev/null", url, timeout=10)
+    return good
+
+
+def resolves(pod: str, name: str) -> bool:
+    # busybox nslookup can exit 1 on short names even when the A record resolved; read the output.
+    out = cmd("kubectl", "-n", NS, "exec", pod, "--", "nslookup", name, timeout=12)[1]
+    return "canonical name" in out or ("Name:" in out and "Address" in out.split("Name:", 1)[1])
+
+
+def default_deny_ok() -> bool:
+    spec = path(obj("networkpolicy", "default-deny"), "spec", default={})
+    return (spec.get("podSelector") in ({}, None) and set(spec.get("policyTypes", [])) == {"Ingress", "Egress"}
+            and not spec.get("ingress") and not spec.get("egress") and bool(obj("networkpolicy", "allow-dns")))
+
+
+def crd_ok() -> bool:
+    c = obj("crd", "backups.cka.io", None)
+    v1 = next((v for v in path(c, "spec", "versions", default=[]) if v.get("name") == "v1"), {})
+    spec_schema = path(v1, "schema", "openAPIV3Schema", "properties", "spec", default={})
+    established = any(x.get("type") == "Established" and x.get("status") == "True" for x in path(c, "status", "conditions", default=[]))
+    return (established and path(c, "spec", "scope") == "Namespaced" and path(c, "spec", "names", "kind") == "Backup"
+            and "bk" in path(c, "spec", "names", "shortNames", default=[]) and v1.get("served") and v1.get("storage")
+            and "schedule" in spec_schema.get("required", []) and path(spec_schema, "properties", "retention", "minimum") == 1)
+
+
+def helm_rolled_back() -> bool:
+    good, raw = cmd("helm", "-n", NS, "history", "rollback-web", "-o", "json")
+    if not good:
+        return False
+    history = json.loads(raw)
+    return (len(history) >= 3 and history[-1].get("status") == "deployed" and "Rollback to 1" in history[-1].get("description", "")
+            and ready("deploy", "mini-web") and image("deploy", "mini-web") == "nginx:1.27")
+
+
+def kustomized() -> bool:
+    good, raw = cmd("kubectl", "-n", NS, "get", "configmaps", "-o", "json")
+    generated = [c for c in json.loads(raw).get("items", []) if c["metadata"]["name"].startswith("prod-web-config-")] if good else []
+    return (ready("deploy", "prod-overlay-web") and path(obj("deploy", "prod-overlay-web"), "metadata", "labels", "env") == "prod"
+            and any(path(c, "data", "MODE") == "prod" and path(c, "metadata", "labels", "env") == "prod" for c in generated))
+
+
 def no_taint(key: str) -> bool:
     good, out = cmd("kubectl", "get", "nodes", "-o", "json")
     return good and not any(t.get("key") == key for n in json.loads(out).get("items", []) for t in n.get("spec", {}).get("taints", []))
@@ -324,6 +473,48 @@ TASKS: dict[int, list[tuple[str, Any]]] = {
     ("Billing service and orders policy", lambda: svc("billing-svc",{"app":"billing"},8080,80) and endpoints("billing-svc") and policies("orders-allow",{"app":"orders"},{"role":"trusted"}) and traffic("trusted-client","orders-svc") and traffic("untrusted-client","orders-svc",False)),
     ("Final-web 3 replicas with Secret+probe", lambda: ready("deploy","final-web",3) and image("deploy","final-web") == "nginx:1.27" and env_source("deploy","final-web","TOKEN","secret","final-secret") and probe("final-web","readinessProbe",80)),
     ("Final proof stored", lambda: volume("final-claim","1Gi") and has_mount("final-writer","final-claim","/data") and proof("final-writer","/data/proof.txt","cka-final")),
+  ],
+  15: [
+    ("etcd snapshot saved after setup and valid", etcd_backup_fresh),
+    ("etcd restored into restoreDir; data rolled back", etcd_restored),
+    ("kubeadm certificate expiration report", lambda: file_contains("day15-certs.txt", "apiserver", "RESIDUAL TIME")),
+    ("CSR user jane: issued, read-only Pods, kubeconfig", lambda: csr_issued("jane") and can_user("jane","list","pods") and not can_user("jane","delete","pods") and file_contains("day15-jane.kubeconfig", "jane", "client-certificate-data")),
+    ("Static Pod static-web on cka-14d-worker", lambda: ready("pod","static-web-cka-14d-worker") and bool(path(obj("pod","static-web-cka-14d-worker"),"metadata","annotations","kubernetes.io/config.mirror"))),
+  ],
+  16: [
+    ("ResourceQuota + LimitRange defaults applied", lambda: quota_ok() and limitrange_ok() and ready("pod","defaulted") and path(obj("pod","defaulted"),"spec","containers",0,"resources") == {"requests": {"cpu": "100m", "memory": "64Mi"}, "limits": {"cpu": "200m", "memory": "128Mi"}}),
+    ("PriorityClass critical-batch used by urgent", lambda: path(obj("priorityclass","critical-batch",None),"value") == 1000000 and path(obj("priorityclass","critical-batch",None),"preemptionPolicy") == "PreemptLowerPriority" and ready("pod","urgent") and path(obj("pod","urgent"),"spec","priorityClassName") == "critical-batch" and path(obj("pod","urgent"),"spec","priority") == 1000000),
+    ("PodDisruptionBudget web-pdb", lambda: str(path(obj("pdb","web-pdb"),"spec","minAvailable")) == "2" and path(obj("pdb","web-pdb"),"spec","selector","matchLabels","app") == "web" and path(obj("pdb","web-pdb"),"status","disruptionsAllowed") == 1),
+    ("spread-web replicas on distinct nodes", lambda: ready("deploy","spread-web",2) and any(t.get("topologyKey") == "kubernetes.io/hostname" for t in path(obj("deploy","spread-web"),"spec","template","spec","affinity","podAntiAffinity","requiredDuringSchedulingIgnoredDuringExecution",default=[])) and pods_on_distinct_nodes("app=spread-web", 2)),
+    ("HPA hpa-app 1-5 @ 50% CPU with live metrics", hpa_ok),
+  ],
+  17: [
+    ("Init container prepared nginx content", lambda: ready("pod","init-web") and len(path(obj("pod","init-web"),"spec","initContainers",default=[])) >= 1 and proof("init-web","/usr/share/nginx/html/index.html","ready from init")),
+    ("Native sidecar streams app log", lambda: ready("pod","log-pair") and native_sidecar("log-pair","log-tail") and "tick" in cmd("kubectl","-n",NS,"logs","log-pair","-c","log-tail","--tail=5")[1]),
+    ("secure-pod hardened security context", secure_pod_ok),
+    ("Pod Security Admission baseline enforced", lambda: path(obj("ns",NS,None),"metadata","labels","pod-security.kubernetes.io/enforce") == "baseline" and path(obj("ns",NS,None),"metadata","labels","pod-security.kubernetes.io/warn") == "restricted" and not obj("pod","priv-test") and file_contains("day17-psa.txt","violates PodSecurity")),
+    ("StatefulSet db with headless Service and claims", lambda: ready("sts","db",2) and path(obj("svc","db-headless"),"spec","clusterIP") == "None" and volume("data-db-0") and volume("data-db-1") and file_contains("day17-dns.txt","db-0.db-headless")),
+  ],
+  18: [
+    ("default-deny both ways, DNS still allowed", lambda: default_deny_ok() and ready("pod","client") and resolves("client","web") and not http_from(NS,"client","http://web")),
+    ("Only client -> api:80 allowed", lambda: bool(obj("networkpolicy","client-egress")) and bool(obj("networkpolicy","api-ingress")) and http_from(NS,"client","http://api") and not http_from(NS,"client","http://web") and not http_from(NS,"other-client","http://api")),
+    ("web reachable from team=frontend namespace only", lambda: bool(obj("networkpolicy","web-from-frontend")) and http_from("cka-d18-frontend","fe-client","http://web.cka-d18") and not http_from(NS,"client","http://web")),
+    ("ExternalName legacy-db", lambda: path(obj("svc","legacy-db"),"spec","type") == "ExternalName" and path(obj("svc","legacy-db"),"spec","externalName") == "api.cka-d18.svc.cluster.local" and resolves("client","legacy-db")),
+    ("Selector-less manual-svc with EndpointSlice", lambda: bool(obj("svc","manual-svc")) and not path(obj("svc","manual-svc"),"spec","selector") and endpoints("manual-svc") and http_from(NS,"client","http://manual-svc")),
+  ],
+  19: [
+    ("Previous-run error saved; crashy fixed", lambda: file_contains("day19-crash.txt","DB_HOST is not set") and ready("deploy","crashy") and any(e.get("name") == "DB_HOST" and e.get("value") == "db.local" for e in path(obj("deploy","crashy"),"spec","template","spec","containers",0,"env",default=[]))),
+    ("Missing ConfigMap created", lambda: path(obj("cm","app-settings"),"data","LEVEL") == "info" and ready("deploy","config-app")),
+    ("Missing PVC created", lambda: volume("logs-claim","200Mi") and ready("pod","needs-storage")),
+    ("Bad nodeSelector removed", lambda: ready("deploy","wrong-node") and not path(obj("deploy","wrong-node"),"spec","template","spec","nodeSelector","disktype") and not cmd("kubectl","get","nodes","-l","disktype","-o","name")[1]),
+    ("Top CPU consumer identified", lambda: (ROOT / "answers/day19-top.txt").is_file() and (ROOT / "answers/day19-top.txt").read_text().strip() == "cpu-burner"),
+  ],
+  20: [
+    ("CRD backups.cka.io with schema", crd_ok),
+    ("Backup nightly valid; broken rejected", lambda: path(obj("backups.cka.io","nightly"),"spec","schedule") == "0 2 * * *" and path(obj("backups.cka.io","nightly"),"spec","retention") == 7 and not obj("backups.cka.io","broken") and file_contains("day20-invalid.txt","retention")),
+    ("Helm release rolled back to revision 1", helm_rolled_back),
+    ("Own Kustomize overlay applied", kustomized),
+    ("CRI, CNI and provisioner identified", lambda: (ROOT / "answers/day20-interfaces.txt").is_file() and all(w in (ROOT / "answers/day20-interfaces.txt").read_text(errors="replace").lower() for w in ("containerd", "calico", "rancher.io/local-path"))),
   ],
 }
 

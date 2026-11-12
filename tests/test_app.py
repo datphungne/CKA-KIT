@@ -51,7 +51,7 @@ def test_rejects_foreign_host_header():
     assert remote.get('/api/health').status_code == 400
 
 
-@pytest.mark.parametrize('day', range(1, 15))
+@pytest.mark.parametrize('day', range(1, 21))
 def test_every_day_serves_five_exercises(client, day):
     r = client.get(f'/api/day/{day}')
     assert r.status_code == 200
@@ -60,7 +60,7 @@ def test_every_day_serves_five_exercises(client, day):
     assert body['markdown'].count('## Exercise ') == 5
 
 
-@pytest.mark.parametrize('day', [0, 15, 99])
+@pytest.mark.parametrize('day', [0, 21, 99])
 def test_day_out_of_range(client, day):
     assert client.get(f'/api/day/{day}').status_code == 400
 
@@ -73,7 +73,7 @@ def test_actions_require_same_origin(client, headers):
 
 @pytest.mark.parametrize('payload', [
     {'action': 'rm -rf /', 'day': 1},
-    {'action': 'setup', 'day': 15},
+    {'action': 'setup', 'day': 21},
     {'action': 'setup', 'day': 0},
 ])
 def test_action_allow_list(client, payload):
@@ -122,7 +122,7 @@ def test_resources_report_disconnected_instead_of_empty(client, monkeypatch):
 
 @pytest.mark.parametrize('action', ['setup', 'verify', 'cleanup'])
 def test_action_scripts_exist_for_every_day(action):
-    for day in range(1, 15):
+    for day in range(1, 21):
         args = console.command_for(console.Action(action=action, day=day))
         assert args[0] == 'bash'
         assert console.ROOT.joinpath(args[1]).is_file()
@@ -156,7 +156,7 @@ def test_terminal_websocket_rejects_foreign_origin(client):
 
 def test_terminal_websocket_rejects_bad_day(client):
     with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect('/ws/terminal/15', headers={**WS_HOST, **ORIGIN}) as ws:
+        with client.websocket_connect('/ws/terminal/21', headers={**WS_HOST, **ORIGIN}) as ws:
             ws.receive_text()
     assert exc.value.code == 1008
 

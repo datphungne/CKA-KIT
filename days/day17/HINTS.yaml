@@ -1,0 +1,195 @@
+# Progressive help for Day 17. Solutions assume namespace cka-d17 is the default.
+exercises:
+  "17.1":
+    docs:
+      - title: Init Containers
+        url: https://kubernetes.io/docs/concepts/workloads/pods/init-containers/
+      - title: Configure Pod initialization
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-initialization/
+    hint: >-
+      Init containers run to completion before app containers start, so they can prepare files in a
+      shared `emptyDir`. Mount the same volume at a work dir in the init container and at
+      `/usr/share/nginx/html` in nginx. Use `printf` (no trailing newline) for an exact match.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: init-web
+      spec:
+        initContainers:
+        - name: prepare
+          image: busybox:1.36
+          command: ["sh", "-c", "printf 'ready from init' > /work/index.html"]
+          volumeMounts:
+          - {name: content, mountPath: /work}
+        containers:
+        - name: nginx
+          image: nginx:1.27
+          volumeMounts:
+          - {name: content, mountPath: /usr/share/nginx/html}
+        volumes:
+        - name: content
+          emptyDir: {}
+      EOF
+      kubectl wait --for=condition=Ready pod/init-web --timeout=120s
+      kubectl exec init-web -- cat /usr/share/nginx/html/index.html; echo
+  "17.2":
+    docs:
+      - title: Sidecar Containers
+        url: https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/
+      - title: Logging Architecture
+        url: https://kubernetes.io/docs/concepts/cluster-administration/logging/
+    hint: >-
+      A native sidecar is declared under `initContainers` with `restartPolicy: Always`: it starts
+      before the app and keeps running. `tail -F` the shared file so its stdout becomes the
+      container log; read it with `kubectl logs log-pair -c log-tail`.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: log-pair
+      spec:
+        initContainers:
+        - name: log-tail
+          image: busybox:1.36
+          restartPolicy: Always          # native sidecar
+          command: ["sh", "-c", "tail -n+1 -F /var/log/app/app.log"]
+          volumeMounts:
+          - {name: logs, mountPath: /var/log/app}
+        containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "i=0; while true; do i=$((i+1)); echo \"tick $i\" >> /var/log/app/app.log; sleep 2; done"]
+          volumeMounts:
+          - {name: logs, mountPath: /var/log/app}
+        volumes:
+        - name: logs
+          emptyDir: {}
+      EOF
+      kubectl wait --for=condition=Ready pod/log-pair --timeout=120s
+      sleep 6
+      kubectl logs log-pair -c log-tail --tail=3
+  "17.3":
+    docs:
+      - title: Configure a Security Context for a Pod or Container
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+    hint: >-
+      User, group and fsGroup belong to the **Pod** `securityContext`; `allowPrivilegeEscalation`,
+      `readOnlyRootFilesystem` and `capabilities.drop: ["ALL"]` are **container** fields.
+      `runAsNonRoot` works at either level.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: secure-pod
+      spec:
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 3000
+          fsGroup: 2000
+          runAsNonRoot: true
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      EOF
+      kubectl wait --for=condition=Ready pod/secure-pod --timeout=120s
+      kubectl exec secure-pod -- id
+      kubectl exec secure-pod -- touch /test 2>&1 || echo "root filesystem is read-only"
+  "17.4":
+    docs:
+      - title: Enforce Pod Security Standards with namespace labels
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/enforce-standards-namespace-labels/
+      - title: Pod Security Admission
+        url: https://kubernetes.io/docs/concepts/security/pod-security-admission/
+      - title: Pod Security Standards
+        url: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+    hint: >-
+      Labels are `pod-security.kubernetes.io/<mode>=<level>` with modes enforce/audit/warn and levels
+      privileged/baseline/restricted. A `privileged: true` container breaks `baseline`, so the API
+      server rejects it with "violates PodSecurity".
+    automated: true
+    solution: |
+      kubectl label namespace cka-d17 \
+        pod-security.kubernetes.io/enforce=baseline \
+        pod-security.kubernetes.io/warn=restricted --overwrite
+      kubectl apply -f - 2>&1 <<'EOF' | tee answers/day17-psa.txt || true
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: priv-test
+      spec:
+        containers:
+        - name: main
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 86400"]
+          securityContext:
+            privileged: true
+      EOF
+      kubectl get pod priv-test 2>&1 || true
+  "17.5":
+    docs:
+      - title: StatefulSets
+        url: https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/
+      - title: Headless Services
+        url: https://kubernetes.io/docs/concepts/services-networking/service/#headless-services
+      - title: DNS for Services and Pods
+        url: https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/
+    hint: >-
+      A headless Service has `clusterIP: None`; the StatefulSet's `serviceName` must name it so each
+      Pod gets `<pod>.<service>.<ns>.svc.cluster.local`. `volumeClaimTemplates` creates one PVC per
+      replica named `<template>-<pod>`.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: db-headless
+      spec:
+        clusterIP: None
+        selector: {app: db}
+        ports:
+        - port: 80
+      ---
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: db
+      spec:
+        serviceName: db-headless
+        replicas: 2
+        selector:
+          matchLabels: {app: db}
+        template:
+          metadata:
+            labels: {app: db}
+          spec:
+            containers:
+            - name: nginx
+              image: nginx:1.27
+              volumeMounts:
+              - {name: data, mountPath: /usr/share/nginx/html}
+        volumeClaimTemplates:
+        - metadata:
+            name: data
+          spec:
+            storageClassName: standard
+            accessModes: [ReadWriteOnce]
+            resources:
+              requests: {storage: 100Mi}
+      EOF
+      kubectl rollout status statefulset/db --timeout=300s
+      kubectl get pvc
+      kubectl exec dns-client -- nslookup db-0.db-headless.cka-d17.svc.cluster.local | tee answers/day17-dns.txt

@@ -1,0 +1,94 @@
+# Progressive help for Day 19. Solutions assume namespace cka-d19 is the default.
+exercises:
+  "19.1":
+    docs:
+      - title: kubectl logs
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_logs/
+      - title: kubectl set env
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_set/kubectl_set_env/
+      - title: Debug running Pods
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/
+    hint: >-
+      A crash-looping container restarts with fresh logs; `kubectl logs --previous` shows the run that
+      died. stderr is captured too. `kubectl set env deployment/<name> KEY=value` patches the Pod
+      template and rolls out new Pods.
+    automated: true
+    solution: |
+      # --previous needs at least one restart
+      until [ "$(kubectl get pods -l app=crashy -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}')" -ge 1 ] 2>/dev/null; do sleep 3; done
+      kubectl logs deployment/crashy --previous | tee answers/day19-crash.txt
+      kubectl set env deployment/crashy DB_HOST=db.local
+      kubectl rollout status deployment/crashy --timeout=180s
+      kubectl logs deployment/crashy
+  "19.2":
+    docs:
+      - title: Debug Pods
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-pods/
+      - title: Configure a Pod to use a ConfigMap
+        url: https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/
+    hint: >-
+      `CreateContainerConfigError` means the kubelet could not assemble the container's config —
+      typically a missing ConfigMap/Secret. The Pod events name it. Create it and the kubelet retries
+      on its own.
+    automated: true
+    solution: |
+      kubectl get pods -l app=config-app
+      kubectl describe pods -l app=config-app | grep -i 'not found' || true
+      kubectl create configmap app-settings --from-literal=LEVEL=info
+      kubectl rollout status deployment/config-app --timeout=180s
+      kubectl logs deployment/config-app
+  "19.3":
+    docs:
+      - title: Persistent Volumes — PersistentVolumeClaims
+        url: https://kubernetes.io/docs/concepts/storage/persistent-volumes/#persistentvolumeclaims
+      - title: Debug Pods
+        url: https://kubernetes.io/docs/tasks/debug/debug-application/debug-pods/
+    hint: >-
+      The scheduler event says `persistentvolumeclaim "logs-claim" not found`. Create a PVC with
+      exactly that name; the Pod is retried automatically.
+    automated: true
+    solution: |
+      kubectl describe pod needs-storage | grep -A4 Events
+      kubectl apply -f - <<'EOF'
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: logs-claim
+      spec:
+        storageClassName: standard
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 200Mi}
+      EOF
+      kubectl wait --for=condition=Ready pod/needs-storage --timeout=180s
+      kubectl get pvc logs-claim
+  "19.4":
+    docs:
+      - title: Assigning Pods to nodes — nodeSelector
+        url: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector
+      - title: Update API objects in place using kubectl patch
+        url: https://kubernetes.io/docs/tasks/manage-kubernetes-objects/update-api-object-kubectl-patch/
+    hint: >-
+      `FailedScheduling ... didn't match Pod's node affinity/selector` — no node has `disktype=nvme`.
+      Remove `spec.template.spec.nodeSelector` (JSON patch `remove`, or `kubectl edit`) instead of
+      labelling a node.
+    automated: true
+    solution: |
+      kubectl get events --field-selector reason=FailedScheduling | tail -2
+      kubectl patch deployment wrong-node --type=json -p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]'
+      kubectl rollout status deployment/wrong-node --timeout=180s
+  "19.5":
+    docs:
+      - title: Resource metrics pipeline
+        url: https://kubernetes.io/docs/tasks/debug/debug-cluster/resource-metrics-pipeline/
+      - title: kubectl top pod
+        url: https://kubernetes.io/docs/reference/kubectl/generated/kubectl_top/kubectl_top_pod/
+    hint: >-
+      `kubectl top pods --sort-by=cpu` lists the heaviest first (needs metrics-server; new Pods take
+      about a minute to appear). Extract just the first name with `--no-headers` and `awk`.
+    automated: true
+    solution: |
+      until kubectl top pod cpu-burner >/dev/null 2>&1; do sleep 5; done
+      kubectl top pods --sort-by=cpu
+      kubectl top pods --sort-by=cpu --no-headers | awk 'NR==1 {print $1}' > answers/day19-top.txt
+      cat answers/day19-top.txt

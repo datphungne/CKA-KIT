@@ -1,6 +1,6 @@
 # CKA-KIT · Real Kubernetes Practice Console
 
-**14 days · 70 hands-on CKA exercises · one local web console · a real Kubernetes cluster.**
+**14-day bootcamp + 6 topic labs · 100 hands-on CKA exercises · one local web console · a real Kubernetes cluster.**
 
 Everything runs on your own machine. The console at `http://127.0.0.1:8765` drives **actual Kubernetes resources** in a disposable three-node [kind](https://kind.sigs.k8s.io/) cluster (Kubernetes v1.37, Calico CNI). The terminal is a real interactive Bash shell running `kubectl`, `helm` and `vim` — no simulated output, no cloud account, no hosting.
 
@@ -25,7 +25,7 @@ Open **http://127.0.0.1:8765**, pick a day and press **Create cluster & start** 
 
 ## Daily workflow
 
-1. **Choose Day 01–14** in the sidebar. Each day has five exercises in its own namespace `cka-dXX`.
+1. **Choose Day 01–14** (bootcamp) or a **Topic Lab 15–20** in the sidebar. Each day has five exercises in its own namespace `cka-dXX`.
 2. **Start Lab** seeds that namespace with the day's broken workloads. Starting a day again resets only that namespace.
 3. **Solve in the terminal.** The shell opens with the day's namespace as default, `k=kubectl`, tab completion, `vim`, `helm` and `$do` (`--dry-run=client -o yaml`). Save evidence files under `/workspace/answers` (persisted in a Docker volume).
 4. **Resources / Events** tabs show live API data for the namespace. If the API is unreachable they say *Disconnected* instead of showing an empty list.
@@ -86,13 +86,26 @@ Browser ── 127.0.0.1:8765 ──► console container (FastAPI)
 | 06 | Maintenance, RBAC, Helm | 13 | Final speed drills |
 | 07 | App troubleshooting | 14 | Final mock |
 
-All 70 instructions are in `WORKBOOK.md` and in the **Exercises** tab. Each `days/dayXX/` folder contains `TASKS.md`, `setup.sh`, `verify.sh`, `cleanup.sh` and `HINTS.yaml` (docs links, hint and reference solution per exercise). 61 of the 70 solutions are machine-verified against the grader. The other 9 are the MANUAL tasks (VM-only work, optional Ingress/Gateway controllers, etcd snapshots and host-level fault drills); their solutions were run by hand on the kind lab where possible.
+**Topic labs** — one CKA domain in depth, every task auto-graded:
+
+| Day | Topic | Exercises |
+| --- | --- | --- |
+| 15 | etcd & control plane | etcdctl snapshot on the node · **full etcd restore** (new data dir, manifest edit, control-plane restart) · certificate expiry · user via CSR + RBAC · static Pod on a worker |
+| 16 | Quotas & autoscaling | ResourceQuota + LimitRange defaults · PriorityClass · PodDisruptionBudget · required pod anti-affinity · HPA with metrics-server |
+| 17 | Pod design & security | init container · native sidecar + logs · securityContext hardening · Pod Security Admission · StatefulSet + headless Service |
+| 18 | Advanced networking | default deny + DNS egress · egress/ingress pair · namespaceSelector · ExternalName · selector-less Service with a manual EndpointSlice |
+| 19 | Troubleshooting II | `logs --previous` · CreateContainerConfigError · missing PVC · bad nodeSelector · `kubectl top` |
+| 20 | Extensibility | CRD with schema · custom resources + validation · Helm upgrade/rollback · your own Kustomize overlay · identify CRI/CNI/provisioner |
+
+Day 15.2 restores etcd for the **whole** lab: anything changed elsewhere between your backup and the restore is rolled back. Days 16 and 19 install metrics-server (v0.9.1) on first use.
+
+All 100 instructions are in `WORKBOOK.md` and in the **Exercises** tab. Each `days/dayXX/` folder contains `TASKS.md`, `setup.sh`, `verify.sh`, `cleanup.sh` and `HINTS.yaml` (docs links, hint and reference solution per exercise). 91 of the 100 solutions are machine-verified against the grader. The other 9 are the MANUAL tasks (VM-only work, optional Ingress/Gateway controllers, etcd snapshots and host-level fault drills); their solutions were run by hand on the kind lab where possible.
 
 Node-level work (Day 05 and the admin parts of the mock exams) happens from the lab terminal the way you would `ssh` in the exam: `kubectl debug node/cka-14d-control-plane -it --profile=sysadmin --image=busybox:1.36`, then `chroot /host`. The fault drills in days 08/11/12 (`admin/host-fault.sh`) need Docker and run from your own machine: `docker compose exec console bash admin/host-fault.sh ...`.
 
 ## Pinned versions
 
-kind v0.33.0 · `kindest/node:v1.37.0` (digest pinned in `cluster/create-kind.sh`) · kubectl v1.37.0 · Helm v3.22.1 · Calico v3.33.0. Calico v3.33 requires Kubernetes ≥ 1.36; keep `KUBECTL_VERSION` in the `Dockerfile` in step with the node image.
+kind v0.33.0 · `kindest/node:v1.37.0` (digest pinned in `cluster/create-kind.sh`) · kubectl v1.37.0 · Helm v3.22.1 · Calico v3.33.0 · metrics-server v0.9.1 (topic labs). Calico v3.33 requires Kubernetes ≥ 1.36; keep `KUBECTL_VERSION` in the `Dockerfile` in step with the node image.
 
 ## Tests
 
@@ -100,10 +113,10 @@ kind v0.33.0 · `kindest/node:v1.37.0` (digest pinned in `cluster/create-kind.sh
 pip install -r requirements-dev.txt
 python -m pytest                                  # unit + contract tests, no cluster needed
 
-# Full lifecycle on a real cluster (setup → verify → cleanup for all 14 days, ~11 min):
+# Full lifecycle on a real cluster (setup → verify → cleanup for all 20 days, ~16 min):
 docker compose up -d --build                      # then create the cluster once in the UI
 CKA_INTEGRATION=1 python -m pytest tests/test_integration.py -v
-CKA_INTEGRATION=1 python -m pytest tests/test_solutions.py -v   # every verified solution must PASS (~25 min)
+CKA_INTEGRATION=1 python -m pytest tests/test_solutions.py -v   # every verified solution must PASS (~40 min)
 CKA_LINKCHECK=1 python -m pytest tests/test_hints.py -k doc_links  # all docs links resolve
 ```
 

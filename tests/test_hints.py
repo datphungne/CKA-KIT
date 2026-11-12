@@ -10,7 +10,7 @@ import pytest
 from hints import EXAM_DOC_HOSTS, HintError, _check_exercise, load_hints
 
 ROOT = Path(__file__).resolve().parents[1]
-DAYS = range(1, 15)
+DAYS = range(1, 21)
 
 
 def task_ids(day):
@@ -30,7 +30,7 @@ def test_every_exercise_has_hint_and_solution(day):
 
 def test_at_least_most_solutions_are_machine_verified():
     automated = sum(v['automated'] for d in DAYS for v in load_hints(d).values())
-    assert automated == 61, automated
+    assert automated == 91, automated
 
 
 @pytest.mark.parametrize('day', DAYS)

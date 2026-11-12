@@ -92,7 +92,7 @@ def test_snapshot_pins_day_namespace(monkeypatch):
     assert config['current-context'] == 'kind-cka-14d'
 
 
-@pytest.mark.parametrize('day', [0, 15, -1])
+@pytest.mark.parametrize('day', [0, 21, -1])
 def test_snapshot_rejects_out_of_range_day(monkeypatch, day):
     monkeypatch.setattr(safety, 'run', fake_runner())
     with pytest.raises(ValueError):

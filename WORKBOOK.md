@@ -1,4 +1,4 @@
-# CKA 14-Day Hands-on Workbook
+# CKA 14-Day Hands-on Workbook + Topic Labs
 
 This workbook contains **70 original practice exercises**, 5 per day. All object names and specs are intentionally precise. Attempt each task without a solution, then run `verify.sh` for feedback. These are **practice exercises, not official CKA exam questions**.
 
@@ -1142,6 +1142,466 @@ bash days/day14/verify.sh
 
 Write down any failed steps and repeat them from a clean `setup.sh`.
 
+
+---
+
+# Day 15 — etcd Backup & Restore, Certificates, Static Pods [TOPIC LAB]
+
+**Initialize:** From the kit root, `bash days/day15/setup.sh`. **Score:** `bash days/day15/verify.sh`.
+
+**Workspace:** All task artifacts go to `answers/`. All Kubernetes resources go to namespace `cka-d15` unless the task explicitly says otherwise.
+
+**Node access:** open a node shell like `ssh` in the exam: `kubectl debug node/cka-14d-control-plane -it --profile=sysadmin --image=busybox:1.36`, then `chroot /host`. `etcdctl` and `etcdutl` are installed on the control-plane node.
+
+> **Warning:** 15.2 restores etcd for the **whole lab cluster**. Every change made anywhere between your backup and the restore is rolled back. If the API server does not come back, recreate the cluster from the console.
+
+## Exercise 15.1 — etcd snapshot on the control plane (15 min)
+
+**Your mission:** On `cka-14d-control-plane`, take an etcd snapshot with `etcdctl` to `/opt/cka-etcd/backup.db`, using the endpoint and TLS files that the etcd static Pod manifest uses. Verify it with `etcdutl snapshot status`.
+
+**Pass when:** `/opt/cka-etcd/backup.db` is a valid snapshot taken after this lab was prepared.
+
+**Check yourself:**
+
+```bash
+etcdutl snapshot status /opt/cka-etcd/backup.db -w table
+```
+
+## Exercise 15.2 — Restore etcd from the snapshot (25 min)
+
+**Your mission:** ConfigMap `keep-me` already exists. After your 15.1 backup, create ConfigMap `after-backup`. Then restore `/opt/cka-etcd/backup.db` with `etcdutl snapshot restore` into the **new** directory named in ConfigMap `etcd-drill` (key `restoreDir`, normally `/var/lib/etcd-from-backup`), and point the etcd static Pod at it by changing only the `hostPath` of its data volume. When etcd is back, restart `kube-apiserver`, `kube-controller-manager` and `kube-scheduler` so none of them keeps serving data cached from before the restore.
+
+**Pass when:** etcd runs from `restoreDir`, kube-apiserver was restarted after etcd, `keep-me` exists, `after-backup` is gone, and all nodes are Ready.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d15 get configmap keep-me after-backup
+```
+
+## Exercise 15.3 — Certificate expiration (10 min)
+
+**Your mission:** On the control plane, check the expiration of all kubeadm-managed certificates and save the full output to `answers/day15-certs.txt`.
+
+**Pass when:** The file contains the kubeadm expiration table including `apiserver`.
+
+**Check yourself:**
+
+```bash
+kubeadm certs check-expiration
+```
+
+## Exercise 15.4 — Add a user with a CertificateSigningRequest (20 min)
+
+**Your mission:** Create a private key and CSR for user `jane` (group `cka-devs`) with `openssl`. Submit it as CertificateSigningRequest `jane` (signer `kubernetes.io/kube-apiserver-client`, usage `client auth`), approve it, and build `answers/day15-jane.kubeconfig` with the issued certificate. Grant `jane` read-only access to Pods in `cka-d15` with Role `jane-pods` and RoleBinding `jane-binding`.
+
+**Pass when:** CSR approved and issued; `jane` can list but not delete Pods in `cka-d15`; kubeconfig saved.
+
+**Check yourself:**
+
+```bash
+kubectl auth can-i list pods --as jane -n cka-d15
+```
+
+## Exercise 15.5 — Static Pod on a worker (12 min)
+
+**Your mission:** Make the kubelet on `cka-14d-worker` run a static Pod `static-web` (`nginx:1.27`) in namespace `cka-d15`. Find the kubelet's `staticPodPath` first.
+
+**Pass when:** Mirror Pod `static-web-cka-14d-worker` is Running in `cka-d15`.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d15 get pod static-web-cka-14d-worker -o wide
+```
+
+## End of day
+
+Run:
+
+```bash
+bash days/day15/verify.sh
+```
+
+---
+
+# Day 16 — Scheduling, Quotas & Autoscaling [TOPIC LAB]
+
+**Initialize:** From the kit root, `bash days/day16/setup.sh`. **Score:** `bash days/day16/verify.sh`.
+
+**Workspace:** All task artifacts go to `answers/`. All Kubernetes resources go to namespace `cka-d16` unless the task explicitly says otherwise. Setup installs metrics-server if the cluster does not have it yet.
+
+## Exercise 16.1 — ResourceQuota and LimitRange (15 min)
+
+**Your mission:** Create ResourceQuota `ns-quota` with `pods=20`, `requests.cpu=2`, `requests.memory=2Gi`, `limits.cpu=4`, `limits.memory=4Gi`. Create LimitRange `ns-limits` giving containers a default request of `100m` CPU / `64Mi` memory and a default limit of `200m` / `128Mi`. Then create Pod `defaulted` (`nginx:1.27`) **without** a resources block.
+
+**Pass when:** Quota and LimitRange match; Pod `defaulted` is Running with the defaults applied.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d16 describe quota ns-quota; kubectl -n cka-d16 get pod defaulted -o jsonpath='{.spec.containers[0].resources}'
+```
+
+## Exercise 16.2 — PriorityClass (10 min)
+
+**Your mission:** Create PriorityClass `critical-batch` with value `1000000` and preemption policy `PreemptLowerPriority`. Run Pod `urgent` (`nginx:1.27`) with that class.
+
+**Pass when:** Pod `urgent` is Running with priority 1000000.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d16 get pod urgent -o jsonpath='{.spec.priority}'
+```
+
+## Exercise 16.3 — PodDisruptionBudget (10 min)
+
+**Your mission:** Deployment `web` runs 3 replicas. Protect it with PodDisruptionBudget `web-pdb` so that at least 2 Pods stay available during voluntary disruptions (drains).
+
+**Pass when:** `web-pdb` selects the `web` Pods with `minAvailable: 2` and allows 1 disruption.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d16 get pdb web-pdb
+```
+
+## Exercise 16.4 — Spread replicas across nodes (12 min)
+
+**Your mission:** Create Deployment `spread-web` (`nginx:1.27`, 2 replicas) whose Pods must never share a node, using **required** pod anti-affinity on `kubernetes.io/hostname`.
+
+**Pass when:** Both replicas Ready on different nodes; required anti-affinity configured.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d16 get pods -l app=spread-web -o wide
+```
+
+## Exercise 16.5 — HorizontalPodAutoscaler (12 min)
+
+**Your mission:** Autoscale Deployment `hpa-app` between 1 and 5 replicas targeting 50% average CPU utilization. Confirm metrics are flowing with `kubectl top`.
+
+**Pass when:** HPA `hpa-app` targets the Deployment with min 1, max 5, CPU 50%, and reports a current CPU value.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d16 get hpa hpa-app; kubectl -n cka-d16 top pods
+```
+
+## End of day
+
+Run:
+
+```bash
+bash days/day16/verify.sh
+```
+
+---
+
+# Day 17 — Pod Design, Security Context & StatefulSets [TOPIC LAB]
+
+**Initialize:** From the kit root, `bash days/day17/setup.sh`. **Score:** `bash days/day17/verify.sh`.
+
+**Workspace:** All task artifacts go to `answers/`. All Kubernetes resources go to namespace `cka-d17` unless the task explicitly says otherwise.
+
+## Exercise 17.1 — Init container (12 min)
+
+**Your mission:** Create Pod `init-web`: an init container `prepare` (`busybox:1.36`) writes the text `ready from init` to `index.html` in an `emptyDir` volume, and the main container `nginx` (`nginx:1.27`) serves that volume from `/usr/share/nginx/html`.
+
+**Pass when:** Pod Running and nginx serves exactly `ready from init`.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d17 exec init-web -- cat /usr/share/nginx/html/index.html
+```
+
+## Exercise 17.2 — Native sidecar and container logs (12 min)
+
+**Your mission:** Create Pod `log-pair`. Container `app` (`busybox:1.36`) appends `tick <n>` to `/var/log/app/app.log` every 2 seconds. A **native sidecar** `log-tail` (an init container with `restartPolicy: Always`) streams that file to its stdout. Both share an `emptyDir`.
+
+**Pass when:** Pod Running and `kubectl logs log-pair -c log-tail` shows ticks.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d17 logs log-pair -c log-tail --tail=3
+```
+
+## Exercise 17.3 — Security context (12 min)
+
+**Your mission:** Create Pod `secure-pod` (`busybox:1.36`, `sleep 86400`) that runs as user `1000`, group `3000`, `fsGroup` `2000`, with `runAsNonRoot`, no privilege escalation, a read-only root filesystem and **all** Linux capabilities dropped.
+
+**Pass when:** Pod Running as UID 1000 with every listed setting present.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d17 exec secure-pod -- id
+```
+
+## Exercise 17.4 — Pod Security Admission (10 min)
+
+**Your mission:** Label namespace `cka-d17` so Pod Security Admission **enforces** `baseline` and **warns** on `restricted`. Prove it: try to create a privileged Pod `priv-test` and save the rejection message to `answers/day17-psa.txt`.
+
+**Pass when:** Namespace labels set, `priv-test` does not exist, and the file shows the PodSecurity violation.
+
+**Check yourself:**
+
+```bash
+kubectl get ns cka-d17 --show-labels
+```
+
+## Exercise 17.5 — StatefulSet with headless Service (15 min)
+
+**Your mission:** Create headless Service `db-headless` (port 80, selector `app=db`) and StatefulSet `db` (`nginx:1.27`, 2 replicas, `serviceName: db-headless`) with a `volumeClaimTemplates` entry `data` (100Mi, mounted at `/usr/share/nginx/html`). Resolve `db-0.db-headless.cka-d17.svc.cluster.local` from a Pod and save the output to `answers/day17-dns.txt`.
+
+**Pass when:** 2/2 replicas Ready, claims `data-db-0` and `data-db-1` Bound, Service is headless, per-Pod DNS name recorded.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d17 get sts,pvc,svc
+```
+
+## End of day
+
+Run:
+
+```bash
+bash days/day17/verify.sh
+```
+
+---
+
+# Day 18 — Advanced Networking: Default Deny, Egress, Namespaces, Endpoints [TOPIC LAB]
+
+**Initialize:** From the kit root, `bash days/day18/setup.sh`. **Score:** `bash days/day18/verify.sh`.
+
+**Workspace:** All Kubernetes resources go to namespace `cka-d18` unless the task explicitly says otherwise. Setup also creates namespace `cka-d18-frontend` (label `team=frontend`) with Pod `fe-client`. In `cka-d18` you have Deployments/Services `web` and `api`, plus Pods `client` (`role=client`) and `other-client`. Do the exercises in order.
+
+## Exercise 18.1 — Default deny with DNS allowed (15 min)
+
+**Your mission:** Create NetworkPolicy `default-deny` that denies **all ingress and egress** for every Pod in `cka-d18`. Then create `allow-dns` so every Pod may still send DNS queries (UDP and TCP 53) to the CoreDNS Pods in `kube-system`.
+
+**Pass when:** `client` can no longer reach `web`, but name resolution still works.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d18 exec client -- nslookup web; kubectl -n cka-d18 exec client -- wget -T 3 -qO- web
+```
+
+## Exercise 18.2 — Egress and ingress for one flow (15 min)
+
+**Your mission:** Allow exactly one flow: Pods `role=client` → Pods `app=api` on TCP/80. You need an egress rule on the client side (`client-egress`) **and** an ingress rule on the server side (`api-ingress`).
+
+**Pass when:** `client` reaches `api`; `client` still cannot reach `web`; `other-client` cannot reach `api`.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d18 exec client -- wget -T 3 -qO- api
+```
+
+## Exercise 18.3 — Traffic from another namespace (12 min)
+
+**Your mission:** Create NetworkPolicy `web-from-frontend` that lets Pods from any namespace labeled `team=frontend` reach `app=web` on TCP/80.
+
+**Pass when:** `fe-client` in `cka-d18-frontend` reaches `web.cka-d18`; `client` in `cka-d18` still cannot.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d18-frontend exec fe-client -- wget -T 3 -qO- web.cka-d18
+```
+
+## Exercise 18.4 — ExternalName Service (8 min)
+
+**Your mission:** Create Service `legacy-db` of type `ExternalName` that aliases `api.cka-d18.svc.cluster.local`.
+
+**Pass when:** `legacy-db` resolves (as a CNAME) from `client`.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d18 exec client -- nslookup legacy-db
+```
+
+## Exercise 18.5 — Service without selector + manual EndpointSlice (15 min)
+
+**Your mission:** Create Service `manual-svc` (port 80, **no selector**) and an EndpointSlice `manual-svc-1` that points it at the current IP of the `api` Pod on port 80.
+
+**Pass when:** `manual-svc` has a ready endpoint and `client` gets an HTTP response through it.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d18 get endpointslice -l kubernetes.io/service-name=manual-svc
+```
+
+## End of day
+
+Run:
+
+```bash
+bash days/day18/verify.sh
+```
+
+---
+
+# Day 19 — Troubleshooting II: Logs, Config Errors, Pending Pods, Metrics [TOPIC LAB]
+
+**Initialize:** From the kit root, `bash days/day19/setup.sh`. **Score:** `bash days/day19/verify.sh`.
+
+**Workspace:** All task artifacts go to `answers/`. All Kubernetes resources go to namespace `cka-d19`. Every workload below is broken on purpose; find the cause from Kubernetes itself (`describe`, `logs`, events) before fixing it.
+
+## Exercise 19.1 — Read the previous container's logs (10 min)
+
+**Your mission:** Deployment `crashy` is in CrashLoopBackOff. Find the error line in the logs of the **previous** container run and save it to `answers/day19-crash.txt`. Fix the Deployment by giving it the missing environment variable with value `db.local`.
+
+**Pass when:** File contains the error line; `crashy` is 1/1 Ready.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d19 logs deploy/crashy --previous
+```
+
+## Exercise 19.2 — CreateContainerConfigError (8 min)
+
+**Your mission:** Deployment `config-app` never starts. Find out why and fix it by creating what is missing, with `LEVEL=info`.
+
+**Pass when:** `config-app` is 1/1 Ready.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d19 describe pod -l app=config-app | tail -5
+```
+
+## Exercise 19.3 — Pod stuck Pending on storage (8 min)
+
+**Your mission:** Pod `needs-storage` is Pending. Fix it without changing the Pod: create the missing object (200Mi, default StorageClass).
+
+**Pass when:** Pod Running and its claim Bound.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d19 describe pod needs-storage | grep -A3 Events
+```
+
+## Exercise 19.4 — Pod stuck Pending on scheduling (8 min)
+
+**Your mission:** Deployment `wrong-node` is Pending. It may run on any worker. Fix the Deployment itself — do **not** label any node.
+
+**Pass when:** `wrong-node` is 1/1 Ready and no node carries a `disktype` label.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d19 get events --field-selector reason=FailedScheduling
+```
+
+## Exercise 19.5 — Resource monitoring (8 min)
+
+**Your mission:** Using `kubectl top`, find the Pod in `cka-d19` that uses the most CPU and write **only its name** to `answers/day19-top.txt`.
+
+**Pass when:** The file names the heaviest CPU consumer.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d19 top pods --sort-by=cpu
+```
+
+## End of day
+
+Run:
+
+```bash
+bash days/day19/verify.sh
+```
+
+---
+
+# Day 20 — Extensibility: CRDs, Helm Lifecycle, Kustomize, Cluster Interfaces [TOPIC LAB]
+
+**Initialize:** From the kit root, `bash days/day20/setup.sh`. **Score:** `bash days/day20/verify.sh`.
+
+**Workspace:** All task artifacts go to `answers/`. All Kubernetes resources go to namespace `cka-d20` unless the task explicitly says otherwise.
+
+## Exercise 20.1 — CustomResourceDefinition (15 min)
+
+**Your mission:** Create CRD `backups.cka.io`: group `cka.io`, version `v1` (served and storage), **Namespaced**, kind `Backup`, plural `backups`, short name `bk`. Its OpenAPI schema requires `spec.schedule` (string) and allows `spec.retention` (integer, minimum 1).
+
+**Pass when:** The CRD is Established with that scope, kind and schema.
+
+**Check yourself:**
+
+```bash
+kubectl get crd backups.cka.io; kubectl explain backup.spec
+```
+
+## Exercise 20.2 — Custom resources and schema validation (8 min)
+
+**Your mission:** Create Backup `nightly` with schedule `0 2 * * *` and retention `7`. Then try to create Backup `broken` with retention `0` and save the API server's rejection to `answers/day20-invalid.txt`.
+
+**Pass when:** `nightly` exists with the right spec; `broken` was rejected by the schema.
+
+**Check yourself:**
+
+```bash
+kubectl -n cka-d20 get bk
+```
+
+## Exercise 20.3 — Helm upgrade and rollback (15 min)
+
+**Your mission:** Install `charts/mini-web` as release `rollback-web`. Upgrade it with image tag `does-not-exist` and watch the rollout fail. Roll the release back to revision 1.
+
+**Pass when:** History shows install, failed-image upgrade and a rollback to 1; Deployment `mini-web` is Ready on `nginx:1.27`.
+
+**Check yourself:**
+
+```bash
+helm -n cka-d20 history rollback-web
+```
+
+## Exercise 20.4 — Write your own Kustomize overlay (15 min)
+
+**Your mission:** Under `answers/day20-kustomize/`, build a base from `materials/kustomize/base` and an overlay `overlays/prod` that sets namespace `cka-d20`, name prefix `prod-`, label `env=prod` on everything, and generates ConfigMap `web-config` with `MODE=prod`. Apply the overlay.
+
+**Pass when:** Deployment `prod-overlay-web` Ready with label `env=prod`; a generated `prod-web-config-<hash>` ConfigMap holds `MODE=prod`.
+
+**Check yourself:**
+
+```bash
+kubectl kustomize answers/day20-kustomize/overlays/prod
+```
+
+## Exercise 20.5 — Identify CRI, CNI and storage plumbing (8 min)
+
+**Your mission:** Find the container runtime (with version) the nodes use, the CNI plugin that provides Pod networking, and the provisioner behind the default StorageClass. Write all three into `answers/day20-interfaces.txt`.
+
+**Pass when:** The file names the runtime, the CNI and the provisioner correctly.
+
+**Check yourself:**
+
+```bash
+kubectl get nodes -o wide; kubectl get storageclass
+```
+
+## End of day
+
+Run:
+
+```bash
+bash days/day20/verify.sh
+```
 
 ---
 

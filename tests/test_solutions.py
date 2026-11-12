@@ -15,7 +15,7 @@ from test_integration import run_action, call
 
 pytestmark = pytest.mark.skipif(os.environ.get('CKA_INTEGRATION') != '1', reason='set CKA_INTEGRATION=1')
 
-DAYS = [int(d) for d in os.environ.get('CKA_DAYS', ','.join(map(str, range(1, 15)))).split(',')]
+DAYS = [int(d) for d in os.environ.get('CKA_DAYS', ','.join(map(str, range(1, 21)))).split(',')]
 CONSOLE = 'cka-kit-console-1'
 
 # Same environment the browser terminal gets: day namespace as default, cwd /workspace.
@@ -65,7 +65,7 @@ def test_reference_solutions_pass_grader(day):
         assert not failed, f'not PASS after solution: {failed}\n{verify["output"][-3000:]}'
     finally:
         cleanup = run_action('cleanup', day)
-        subprocess.run(['docker', 'exec', CONSOLE, 'sh', '-c', f'rm -f /workspace/answers/day{day:02d}-*'], check=False)
+        subprocess.run(['docker', 'exec', CONSOLE, 'sh', '-c', f'rm -rf /workspace/answers/day{day:02d}-*'], check=False)
         assert cleanup['code'] == 0, cleanup['output'][-2000:]
 
 

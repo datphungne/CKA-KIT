@@ -1,0 +1,172 @@
+# Progressive help for Day 18. Solutions assume namespace cka-d18 is the default.
+exercises:
+  "18.1":
+    docs:
+      - title: Network Policies — default policies
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/#default-policies
+      - title: Debugging DNS resolution
+        url: https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/
+    hint: >-
+      `podSelector: {}` selects every Pod; listing both `Ingress` and `Egress` in `policyTypes` with no
+      rules denies everything. DNS then breaks too — add an egress policy to Pods
+      `k8s-app=kube-dns` in the namespace `kubernetes.io/metadata.name=kube-system`, ports UDP and TCP 53.
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: default-deny
+      spec:
+        podSelector: {}
+        policyTypes: [Ingress, Egress]
+      ---
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-dns
+      spec:
+        podSelector: {}
+        policyTypes: [Egress]
+        egress:
+        - to:
+          - namespaceSelector:
+              matchLabels: {kubernetes.io/metadata.name: kube-system}
+            podSelector:
+              matchLabels: {k8s-app: kube-dns}
+          ports:
+          - {protocol: UDP, port: 53}
+          - {protocol: TCP, port: 53}
+      EOF
+      sleep 5
+      # busybox nslookup may exit 1 for short names even when they resolve; use the FQDN.
+      kubectl exec client -- nslookup web.cka-d18.svc.cluster.local | tail -2
+      kubectl exec client -- wget -T 3 -q -O /dev/null http://web && echo "web reachable (WRONG)" || echo "web blocked"
+  "18.2":
+    docs:
+      - title: Network Policies — the NetworkPolicy resource
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-resource
+    hint: >-
+      Under default deny a connection needs permission on **both** ends: an `Egress` rule on the
+      client Pods (`to: podSelector app=api`, port 80) and an `Ingress` rule on the api Pods
+      (`from: podSelector role=client`, port 80).
+    automated: true
+    solution: |
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: client-egress
+      spec:
+        podSelector:
+          matchLabels: {role: client}
+        policyTypes: [Egress]
+        egress:
+        - to:
+          - podSelector:
+              matchLabels: {app: api}
+          ports:
+          - {protocol: TCP, port: 80}
+      ---
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: api-ingress
+      spec:
+        podSelector:
+          matchLabels: {app: api}
+        policyTypes: [Ingress]
+        ingress:
+        - from:
+          - podSelector:
+              matchLabels: {role: client}
+          ports:
+          - {protocol: TCP, port: 80}
+      EOF
+      sleep 5
+      kubectl exec client -- wget -T 3 -q -O /dev/null http://api && echo "client -> api: allowed"
+      kubectl exec other-client -- wget -T 3 -q -O /dev/null http://api || echo "other-client -> api: blocked"
+  "18.3":
+    docs:
+      - title: Network Policies — behavior of to and from selectors
+        url: https://kubernetes.io/docs/concepts/services-networking/network-policies/#behavior-of-to-and-from-selectors
+    hint: >-
+      Use `namespaceSelector` alone (not combined with a `podSelector` in the same item) to admit
+      every Pod from matching namespaces. `fe-client`'s namespace has no policies, so its egress is free.
+    automated: true
+    solution: |
+      kubectl get namespace cka-d18-frontend --show-labels
+      kubectl apply -f - <<'EOF'
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: web-from-frontend
+      spec:
+        podSelector:
+          matchLabels: {app: web}
+        policyTypes: [Ingress]
+        ingress:
+        - from:
+          - namespaceSelector:
+              matchLabels: {team: frontend}
+          ports:
+          - {protocol: TCP, port: 80}
+      EOF
+      sleep 5
+      kubectl -n cka-d18-frontend exec fe-client -- wget -T 3 -q -O /dev/null http://web.cka-d18 && echo "frontend -> web: allowed"
+      kubectl exec client -- wget -T 3 -q -O /dev/null http://web || echo "client -> web: still blocked"
+  "18.4":
+    docs:
+      - title: Service type ExternalName
+        url: https://kubernetes.io/docs/concepts/services-networking/service/#externalname
+    hint: >-
+      `kubectl create service externalname <name> --external-name <dns-name>`. No ClusterIP or
+      proxying is involved — CoreDNS answers with a CNAME.
+    automated: true
+    solution: |
+      kubectl create service externalname legacy-db --external-name api.cka-d18.svc.cluster.local
+      kubectl exec client -- nslookup legacy-db.cka-d18.svc.cluster.local | tail -4
+  "18.5":
+    docs:
+      - title: Services without selectors
+        url: https://kubernetes.io/docs/concepts/services-networking/service/#services-without-selectors
+      - title: EndpointSlices
+        url: https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/
+    hint: >-
+      Without a selector nothing creates endpoints for you. The EndpointSlice is linked by the label
+      `kubernetes.io/service-name: <service>`; its port name must equal the Service port name (both
+      empty here). Mark it `endpointslice.kubernetes.io/managed-by` with your own value.
+    automated: true
+    solution: |
+      API_IP=$(kubectl get pods -l app=api -o jsonpath='{.items[0].status.podIP}')
+      echo "api Pod IP: $API_IP"
+      kubectl apply -f - <<EOF
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: manual-svc
+      spec:
+        ports:
+        - protocol: TCP
+          port: 80
+          targetPort: 80
+      ---
+      apiVersion: discovery.k8s.io/v1
+      kind: EndpointSlice
+      metadata:
+        name: manual-svc-1
+        labels:
+          kubernetes.io/service-name: manual-svc
+          endpointslice.kubernetes.io/managed-by: cka-learner
+      addressType: IPv4
+      ports:
+      - name: ""
+        protocol: TCP
+        port: 80
+      endpoints:
+      - addresses: ["$API_IP"]
+        conditions: {ready: true}
+      EOF
+      sleep 3
+      kubectl get endpointslice -l kubernetes.io/service-name=manual-svc
+      kubectl exec client -- wget -T 3 -q -O /dev/null http://manual-svc && echo "manual-svc works"

@@ -4,7 +4,7 @@ ARG TARGETARCH
 ARG KIND_VERSION=v0.33.0
 ARG KUBECTL_VERSION=v1.37.0
 ARG HELM_VERSION=v3.22.1
-RUN apt-get update && apt-get install -y --no-install-recommends bash bash-completion ca-certificates curl docker.io vim-tiny less procps git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends bash bash-completion ca-certificates curl docker.io vim-tiny less procps git openssl && rm -rf /var/lib/apt/lists/*
 RUN set -eux; arch="${TARGETARCH:-amd64}"; \
     curl -fsSLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${arch}"; \
     curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl"; \

@@ -41,7 +41,7 @@ CONTEXT = 'kind-cka-14d'
 CLUSTER = 'cka-14d'
 JOB_TTL = 3600
 sys.path.insert(0, str(ROOT / 'lib'))
-from safety import snapshot, trusted_config
+from safety import MAX_DAY, snapshot, trusted_config
 from netguard import from_lab_network, lab_networks
 from hints import HintError, load_hints
 
@@ -95,8 +95,8 @@ def cli(args: list[str], timeout=9, env=None) -> dict:
 
 
 def safe_day(day: int) -> int:
-    if not 1 <= day <= 14:
-        raise HTTPException(400, 'Day must be between 1 and 14')
+    if not 1 <= day <= MAX_DAY:
+        raise HTTPException(400, f'Day must be between 1 and {MAX_DAY}')
     return day
 
 
@@ -216,7 +216,7 @@ def resources(day: int):
 
 class Action(BaseModel):
     action: Literal['create-cluster', 'doctor', 'setup', 'verify', 'cleanup']
-    day: int = Field(default=1, ge=1, le=14)
+    day: int = Field(default=1, ge=1, le=MAX_DAY)
 
 
 def command_for(req: Action) -> list[str]:
@@ -337,7 +337,7 @@ async def terminal(ws: WebSocket, day: int):
     # HTTP middleware does not run for WebSockets, so repeat the network check here.
     from_lab = await lab_client(ws.client)
     # No await between the capacity check and the reservation, so concurrent handshakes cannot exceed the cap.
-    if from_lab or not 1 <= day <= 14 or not local_origin(ws.headers) or len(_terminals) >= MAX_TERMINALS:
+    if from_lab or not 1 <= day <= MAX_DAY or not local_origin(ws.headers) or len(_terminals) >= MAX_TERMINALS:
         await ws.close(code=1008)
         return
     name = 'cka-terminal-' + uuid.uuid4().hex[:12]

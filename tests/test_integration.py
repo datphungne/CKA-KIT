@@ -58,7 +58,7 @@ def namespace_pods(day):
     return call(f'/api/resources/{day}')
 
 
-@pytest.mark.parametrize('day', range(1, 15))
+@pytest.mark.parametrize('day', range(1, 21))
 def test_day_lifecycle(day):
     setup = run_action('setup', day)
     assert setup['code'] == 0, setup['output'][-3000:]

@@ -13,7 +13,7 @@ exercises:
     automated: false
     solution: |
       kubectl debug node/cka-14d-control-plane --image=busybox:1.36 --profile=sysadmin -- sleep 1800
-      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1)
+      NODE_POD=$(kubectl get pods -o name | grep node-debugger-cka-14d-control-plane | head -1 || true)
       kubectl wait --for=condition=Ready "$NODE_POD" --timeout=90s
       E="kubectl -n kube-system exec etcd-cka-14d-control-plane --"
       $E etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \

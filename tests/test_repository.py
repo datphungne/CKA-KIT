@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-DAYS = [ROOT / 'days' / f'day{d:02d}' for d in range(1, 15)]
+DAYS = [ROOT / 'days' / f'day{d:02d}' for d in range(1, 21)]
 SCRIPTS = sorted(p for p in ROOT.rglob('*.sh') if '.git' not in p.parts)
 BASH = shutil.which('bash')
 
@@ -26,7 +26,7 @@ def test_grader_has_five_checks_per_day():
     tasks = next(n.value for n in ast.walk(tree)
                  if isinstance(n, ast.AnnAssign) and getattr(n.target, 'id', '') == 'TASKS')
     counts = {k.value: len(v.elts) for k, v in zip(tasks.keys, tasks.values, strict=True)}
-    assert counts == {d: 5 for d in range(1, 15)}
+    assert counts == {d: 5 for d in range(1, 21)}
 
 
 @pytest.mark.skipif(not BASH, reason='bash not installed')
@@ -52,7 +52,7 @@ def test_day_scripts_go_through_safety_guard(day):
 
 
 @pytest.mark.skipif(not BASH, reason='bash not installed')
-@pytest.mark.parametrize('value,expected', [('1', 'cka-d01'), ('07', 'cka-d07'), ('14', 'cka-d14')])
+@pytest.mark.parametrize('value,expected', [('1', 'cka-d01'), ('07', 'cka-d07'), ('14', 'cka-d14'), ('20', 'cka-d20')])
 def test_ns_for_day_valid(value, expected):
     out = subprocess.run([BASH, '-c', f'source lib/common.sh; ns_for_day "{value}"'],
                          cwd=ROOT, capture_output=True, text=True)
@@ -60,7 +60,7 @@ def test_ns_for_day_valid(value, expected):
 
 
 @pytest.mark.skipif(not BASH, reason='bash not installed')
-@pytest.mark.parametrize('value', ['0', '15', 'abc', '1; rm -rf /', '', 'kube-system'])
+@pytest.mark.parametrize('value', ['0', '21', 'abc', '1; rm -rf /', '', 'kube-system'])
 def test_ns_for_day_rejects_everything_else(value):
     out = subprocess.run([BASH, '-c', 'source lib/common.sh; ns_for_day "$1"', '_', value],
                          cwd=ROOT, capture_output=True, text=True)

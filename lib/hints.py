@@ -1,6 +1,6 @@
 """Load and validate days/dayXX/HINTS.yaml (progressive hints + reference solutions).
 
-Schema per exercise id ("01.1" ... "14.5"):
+Schema per exercise id ("01.1" ... "20.5"):
     docs:      list of {title, url}; url must be on a site allowed during the CKA exam
     hint:      short nudge shown together with the docs
     solution:  shell commands, written for the lab terminal (day namespace is the default)
